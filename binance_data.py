@@ -1,7 +1,6 @@
 """Получение свечей с Binance через ccxt (асинхронно)."""
 import ccxt.async_support as ccxt
 import pandas as pd
-
 import config
 
 
@@ -10,27 +9,20 @@ class BinanceData:
         self.exchange = ccxt.binance({"enableRateLimit": True})
 
     async def fetch_closed_candles(self, symbol: str, timeframe: str | None = None) -> pd.DataFrame:
-        """Возвращает DataFrame закрытых свечей (Open, High, Low, Close, Volume)."""
         tf = timeframe or config.TIMEFRAME
-        limit = config.CANDLES_LIMIT
-        
-        # Явно вычисляем время начала (сейчас минус 500 свечей).
-        # Это гарантирует, что бот всегда запрашивает актуальные данные, 
-        # а не кэш с 2024 года.
-        tf_ms = self.exchange.parse_timeframe(tf) * 1000
-        since = self.exchange.milliseconds() - (limit * tf_ms)
-        
+        # Убрали since, чтобы избежать пустых ответов
         raw = await self.exchange.fetch_ohlcv(
-            symbol, tf, since=since, limit=limit
+            symbol, tf, limit=config.CANDLES_LIMIT
         )
         
+        if not raw:
+            raise ValueError(f"Binance вернул пустой ответ для {symbol} {tf}")
+
         df = pd.DataFrame(
             raw, columns=["ts", "Open", "High", "Low", "Close", "Volume"]
         )
         df["Date"] = pd.to_datetime(df["ts"], unit="ms")
         df = df.set_index("Date").drop(columns="ts").astype(float)
-        
-        # Последняя свеча еще формируется — отбрасываем её
         return df.iloc[:-1]
 
     async def close(self) -> None:
