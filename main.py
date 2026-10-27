@@ -19,7 +19,6 @@ SENT_FILE = config.BASE_DIR / "sent_signals.json"
 
 
 def load_sent() -> set[str]:
-    """Загружаем ID уже отправленных сигналов (защита от дублей после перезапуска)."""
     try:
         return set(json.loads(SENT_FILE.read_text(encoding="utf-8")))
     except (FileNotFoundError, json.JSONDecodeError):
@@ -34,7 +33,6 @@ def format_signal(sig: Signal, symbol: str) -> str:
     is_long = sig.direction == "long"
     risk_pct = abs(sig.entry - sig.sl) / sig.entry * 100
     
-    # Считаем фактический R:R для отображения
     if is_long:
         actual_rr = (sig.tp - sig.entry) / (sig.entry - sig.sl)
     else:
@@ -42,7 +40,7 @@ def format_signal(sig: Signal, symbol: str) -> str:
 
     return (
         f"{'🟢' if is_long else '🔴'} <b>{'LONG' if is_long else 'SHORT'} "
-        f"{symbol}</b> ({config.TIMEFRAME})\n\n"
+        f"{symbol}</b> ({sig.timeframe})\n\n"
         f"Вход: <b>{sig.entry:,.2f}</b>\n"
         f"Stop-Loss: <b>{sig.sl:,.2f}</b>\n"
         f"Take-Profit: <b>{sig.tp:,.2f}</b>\n"
@@ -69,94 +67,102 @@ async def send_signal(bot: Bot, df, sig: Signal, symbol: str) -> None:
         logging.exception(f"Не удалось построить или отправить график {symbol}")
 
 
-# Словарь для защиты от спама сигналами по одной паре (Cooldown)
 last_signal_time = {}
 
 async def signal_loop(bot: Bot, data: BinanceData, symbol: str) -> None:
-    """Фоновый цикл: проверяем новые закрытые свечи и ищем сигналы."""
+    """Фоновый цикл: проверяем 15m и 1h одновременно."""
     sent = load_sent()
-    last_ts = None  # время последней обработанной свечи
+    last_ts_15m = None
+    last_ts_1h = None
+    
     while True:
         try:
-            # 1. Запрашиваем свечи младшего ТФ (1h) для поиска OB
-            df = await data.fetch_closed_candles(symbol)
-            # 2. Запрашиваем свечи старшего ТФ (4h) для фильтра тренда
-            df_htf = await data.fetch_closed_candles(symbol, timeframe="4h")
+            # 1. Запрашиваем свечи для всех трех ТФ
+            df_15m = await data.fetch_closed_candles(symbol, timeframe="15m")
+            df_1h = await data.fetch_closed_candles(symbol, timeframe="1h")
+            df_4h = await data.fetch_closed_candles(symbol, timeframe="4h")
 
-            if last_ts is None or df.index[-1] > last_ts:
-                # Передаем df_htf в обновленный analyze
-                signals = await asyncio.to_thread(
-                    analyze, df, df_htf, config.SWING_PERIOD, config.RISK_REWARD, config.TICK_SIZE
+            all_signals = []
+
+            # 2. Анализ 15m (фильтр: 1h)
+            if last_ts_15m is None or df_15m.index[-1] > last_ts_15m:
+                sigs_15m = await asyncio.to_thread(
+                    analyze, df_15m, df_1h, config.SWING_PERIOD, config.RISK_REWARD, config.TICK_SIZE
                 )
-                for sig in signals:
-                    # Уникальный ключ с учётом символа
-                    key = f"{symbol}_{sig.uid}"
-                    # Первый запуск — только сигнал на последней свече
-                    fresh = (
-                        sig.time == df.index[-1] if last_ts is None else sig.time > last_ts
-                    )
-                    if not fresh or key in sent:
-                        continue
+                for s in sigs_15m:
+                    s.timeframe = "15m"
+                    all_signals.append((s, df_15m))
+                last_ts_15m = df_15m.index[-1]
 
-                    # --- ФИЛЬТР COOLDOWN (2 часа = 7200 сек) ---
-                    current_time = time.time()
-                    last_time = last_signal_time.get(symbol, 0)
-                    if current_time - last_time < 7200:
-                        logging.info(f"Сигнал {symbol} пропущен (Cooldown 2 часа).")
-                        continue
+            # 3. Анализ 1h (фильтр: 4h)
+            if last_ts_1h is None or df_1h.index[-1] > last_ts_1h:
+                sigs_1h = await asyncio.to_thread(
+                    analyze, df_1h, df_4h, config.SWING_PERIOD, config.RISK_REWARD, config.TICK_SIZE
+                )
+                for s in sigs_1h:
+                    s.timeframe = "1h"
+                    all_signals.append((s, df_1h))
+                last_ts_1h = df_1h.index[-1]
 
-                    await send_signal(bot, df, sig, symbol)
-                    
-                    # Записываем время успешной отправки
-                    last_signal_time[symbol] = current_time
-                    sent.add(key)
-                    save_sent(sent)
-                    
-                last_ts = df.index[-1]
-                state.last_candle = f"{last_ts:%Y-%m-%d %H:%M}"
+            # 4. Фильтрация и отправка
+            for sig, df_source in all_signals:
+                key = f"{symbol}_{sig.timeframe}_{sig.uid}"
+                
+                # Проверка на свежесть
+                fresh = False
+                if sig.timeframe == "15m":
+                    fresh = (sig.time == df_15m.index[-1] if last_ts_15m else sig.time > (last_ts_15m or 0))
+                else:
+                    fresh = (sig.time == df_1h.index[-1] if last_ts_1h else sig.time > (last_ts_1h or 0))
+
+                if not fresh or key in sent:
+                    continue
+
+                # Cooldown 1 час (отдельно для 15m и 1h по каждой паре)
+                cooldown_key = f"{symbol}_{sig.timeframe}"
+                current_time = time.time()
+                last_time = last_signal_time.get(cooldown_key, 0)
+                if current_time - last_time < 3600:
+                    continue
+
+                await send_signal(bot, df_source, sig, symbol)
+                
+                last_signal_time[cooldown_key] = current_time
+                sent.add(key)
+                save_sent(sent)
+                
+            state.last_candle = f"{df_15m.index[-1]:%Y-%m-%d %H:%M}"
+            
         except asyncio.CancelledError:
             raise
         except Exception:
-            logging.exception(f"Ошибка в цикле проверки сигналов ({symbol})")
+            logging.exception(f"Ошибка в цикле проверки ({symbol})")
         await asyncio.sleep(config.CHECK_INTERVAL)
 
 
 async def main() -> None:
-    logging.basicConfig(
-        level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
-    )
-    bot = Bot(
-        token=config.BOT_TOKEN,
-        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
-    )
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    bot = Bot(token=config.BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher()
     dp.include_router(router)
     data = BinanceData()
 
-    # Запускаем по одному циклу на каждую пару
-    tasks = [
-        asyncio.create_task(signal_loop(bot, data, sym))
-        for sym in config.SYMBOLS
-    ]
+    tasks = [asyncio.create_task(signal_loop(bot, data, sym)) for sym in config.SYMBOLS]
 
     try:
         try:
             await bot.delete_webhook(drop_pending_updates=True)
         except Exception as e:
-            print(f"Не удалось удалить вебхук (возможно, проблемы с сетью): {e}")
+            print(f"Не удалось удалить вебхук: {e}")
 
         try:
             await bot.send_message(
-                config.CHAT_ID,
-                f"Бот запущен: {len(config.SYMBOLS)} пар, ТФ {config.TIMEFRAME}",
+                config.CHAT_ID, f"Бот запущен (15m + 1h): {len(config.SYMBOLS)} пар"
             )
         except Exception:
-            logging.exception(
-                "Не удалось отправить стартовое сообщение (проверьте CHAT_ID)"
-            )
+            logging.exception("Ошибка стартового сообщения")
 
         await dp.start_polling(bot)
-
     finally:
         for t in tasks:
             t.cancel()
