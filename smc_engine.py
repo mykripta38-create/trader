@@ -55,6 +55,9 @@ def analyze(
     rr: float = 3.0, 
     tick: float = 0.01
 ) -> list[Signal]:
+    # --- ЗАЩИТА ОТ ПУСТЫХ ДАННЫХ ---
+    if df.empty or df_htf.empty:
+        return []
     half = max(1, swing_period // 2)
     o = df["Open"].to_numpy(float)
     h = df["High"].to_numpy(float)
