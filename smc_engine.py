@@ -36,7 +36,7 @@ class Signal:
     time: pd.Timestamp
     math_tp: float = 0.0
     logical_tp: float = 0.0
-    timeframe: str = ""  # <-- Добавлено поле для ТФ
+    timeframe: str = ""
 
 
 def _find_order_block(o, h, l, c, times, t: int, direction: str) -> OrderBlock | None:
@@ -55,9 +55,12 @@ def analyze(
     rr: float = 3.0, 
     tick: float = 0.01
 ) -> list[Signal]:
-    # --- ЗАЩИТА ОТ ПУСТЫХ ДАННЫХ ---
-    if df.empty or df_htf.empty:
+    # --- НАДЕЖНАЯ ЗАЩИТА ОТ ПУСТЫХ ДАННЫХ ---
+    if df.empty or df_htf.empty or len(df) < 2 or len(df_htf) < 2:
         return []
+    if 'Close' not in df.columns or 'Close' not in df_htf.columns:
+        return []
+
     half = max(1, swing_period // 2)
     o = df["Open"].to_numpy(float)
     h = df["High"].to_numpy(float)
