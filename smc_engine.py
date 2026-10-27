@@ -3,7 +3,7 @@ from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
-import pandas_ta as ta  # Требуется: pip install pandas_ta
+import pandas_ta_classic as ta  # Требуется: pip install pandas_ta
 
 OB_LOOKBACK = 50  # на сколько баров назад искать противоположную свечу
 
