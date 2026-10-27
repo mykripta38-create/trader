@@ -33,7 +33,9 @@ class Signal:
     ob_top: float
     ob_bottom: float
     ob_time: pd.Timestamp
-    time: pd.Timestamp  # время свечи ретеста
+    time: pd.Timestamp
+    math_tp: float = 0.0
+    logical_tp: float = 0.0
 
 
 def _find_order_block(o, h, l, c, times, t: int, direction: str) -> OrderBlock | None:
@@ -63,8 +65,8 @@ def analyze(
     times = df.index
 
     # --- ПОДГОТОВКА ФИЛЬТРОВ ---
-    # 1. Тренд по старшему ТФ (EMA 50)
-    ema_htf = df_htf['Close'].ewm(span=50, adjust=False).mean().iloc[-1]
+    # 1. Тренд по старшему ТФ (4H, EMA 20)
+    ema_htf = df_htf['Close'].ewm(span=20, adjust=False).mean().iloc[-1]
     htf_close = df_htf['Close'].iloc[-1]
     htf_trend = "long" if htf_close > ema_htf else "short"
 
@@ -93,7 +95,6 @@ def analyze(
             if not ob.active or ob.used:
                 continue
             
-            # ФИЛЬТР ТРЕНДА: пропускаем, если сигнал против старшего ТФ
             if ob.direction != htf_trend:
                 continue
 
@@ -102,40 +103,55 @@ def analyze(
                     ob.active = False
                     continue
                 if trend == 1 and l[t] <= ob.top:
-                    
-                    # ФИЛЬТР ОБЪЕМА: на свече ретеста должен быть всплеск
                     if pd.isna(avg_vol_series.iloc[t]) or v[t] < avg_vol_series.iloc[t] * 1.5:
                         continue
 
                     entry = float(c[t])
-                    # БЕЗОПАСНЫЙ СТОП: низ OB минус 0.5 ATR
                     atr_val = atr_series.iloc[t] if not pd.isna(atr_series.iloc[t]) else (entry * 0.002)
                     sl = ob.bottom - (atr_val * 0.5)
                     
                     if entry > sl:
-                        tp = entry + rr * (entry - sl)
+                        math_tp = entry + rr * (entry - sl)
+                        logical_tp = last_sh + (last_sh * 0.001) if last_sh else math_tp
+                        
+                        # Выбираем более близкую цель
+                        tp = logical_tp if (logical_tp < math_tp and logical_tp > entry) else math_tp
+                        
+                        # СТРОГИЙ ФИЛЬТР R:R (не менее 1:3)
+                        current_rr = (tp - entry) / (entry - sl)
+                        if current_rr < 3.0:  
+                            continue
+                            
                         signals.append(Signal(ob.uid, "long", entry, sl, tp, rr,
-                                              ob.top, ob.bottom, ob.time, times[t]))
+                                              ob.top, ob.bottom, ob.time, times[t],
+                                              math_tp=math_tp, logical_tp=logical_tp))
                         ob.used = True
             else: # SHORT
                 if c[t] > ob.top:
                     ob.active = False
                     continue
                 if trend == -1 and h[t] >= ob.bottom:
-                    
-                    # ФИЛЬТР ОБЪЕМА
                     if pd.isna(avg_vol_series.iloc[t]) or v[t] < avg_vol_series.iloc[t] * 1.5:
                         continue
 
                     entry = float(c[t])
-                    # БЕЗОПАСНЫЙ СТОП: верх OB плюс 0.5 ATR
                     atr_val = atr_series.iloc[t] if not pd.isna(atr_series.iloc[t]) else (entry * 0.002)
                     sl = ob.top + (atr_val * 0.5)
                     
                     if entry < sl:
-                        tp = entry - rr * (sl - entry)
+                        math_tp = entry - rr * (sl - entry)
+                        logical_tp = last_sl - (last_sl * 0.001) if last_sl else math_tp
+                        
+                        tp = logical_tp if (logical_tp > math_tp and logical_tp < entry) else math_tp
+                        
+                        # СТРОГИЙ ФИЛЬТР R:R (не менее 1:3)
+                        current_rr = (entry - tp) / (sl - entry)
+                        if current_rr < 3.0:  
+                            continue
+                            
                         signals.append(Signal(ob.uid, "short", entry, sl, tp, rr,
-                                              ob.top, ob.bottom, ob.time, times[t]))
+                                              ob.top, ob.bottom, ob.time, times[t],
+                                              math_tp=math_tp, logical_tp=logical_tp))
                         ob.used = True
 
         # 3. BOS / CHoCH

@@ -2,7 +2,7 @@
 import asyncio
 import json
 import logging
-import time  # <-- Добавлено для Cooldown
+import time
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
@@ -33,13 +33,23 @@ def save_sent(sent: set[str]) -> None:
 def format_signal(sig: Signal, symbol: str) -> str:
     is_long = sig.direction == "long"
     risk_pct = abs(sig.entry - sig.sl) / sig.entry * 100
+    
+    # Считаем фактический R:R для отображения
+    if is_long:
+        actual_rr = (sig.tp - sig.entry) / (sig.entry - sig.sl)
+    else:
+        actual_rr = (sig.entry - sig.tp) / (sig.sl - sig.entry)
+
     return (
         f"{'🟢' if is_long else '🔴'} <b>{'LONG' if is_long else 'SHORT'} "
         f"{symbol}</b> ({config.TIMEFRAME})\n\n"
         f"Вход: <b>{sig.entry:,.2f}</b>\n"
         f"Stop-Loss: <b>{sig.sl:,.2f}</b>\n"
         f"Take-Profit: <b>{sig.tp:,.2f}</b>\n"
-        f"R:R = 1:{sig.rr:g} | риск {risk_pct:.2f}%\n\n"
+        f"R:R = 1:{actual_rr:.2f} | риск {risk_pct:.2f}%\n\n"
+        f"<i>Цели:</i>\n"
+        f"├ Логическая (свинг): {sig.logical_tp:,.2f}\n"
+        f"└ Математическая (1:{sig.rr:g}): {sig.math_tp:,.2f}\n\n"
         f"Order Block: {sig.ob_bottom:,.2f} – {sig.ob_top:,.2f}\n"
         f"Свеча ретеста (UTC): {sig.time:%Y-%m-%d %H:%M}"
     )
@@ -68,10 +78,10 @@ async def signal_loop(bot: Bot, data: BinanceData, symbol: str) -> None:
     last_ts = None  # время последней обработанной свечи
     while True:
         try:
-            # 1. Запрашиваем свечи младшего ТФ (15m) для поиска OB
+            # 1. Запрашиваем свечи младшего ТФ (1h) для поиска OB
             df = await data.fetch_closed_candles(symbol)
-            # 2. Запрашиваем свечи старшего ТФ (1h) для фильтра тренда
-            df_htf = await data.fetch_closed_candles(symbol, timeframe="1h")
+            # 2. Запрашиваем свечи старшего ТФ (4h) для фильтра тренда
+            df_htf = await data.fetch_closed_candles(symbol, timeframe="4h")
 
             if last_ts is None or df.index[-1] > last_ts:
                 # Передаем df_htf в обновленный analyze
@@ -88,11 +98,11 @@ async def signal_loop(bot: Bot, data: BinanceData, symbol: str) -> None:
                     if not fresh or key in sent:
                         continue
 
-                    # --- ФИЛЬТР COOLDOWN (1 час) ---
+                    # --- ФИЛЬТР COOLDOWN (2 часа = 7200 сек) ---
                     current_time = time.time()
                     last_time = last_signal_time.get(symbol, 0)
-                    if current_time - last_time < 3600:
-                        logging.info(f"Сигнал {symbol} пропущен (Cooldown 1 час).")
+                    if current_time - last_time < 7200:
+                        logging.info(f"Сигнал {symbol} пропущен (Cooldown 2 часа).")
                         continue
 
                     await send_signal(bot, df, sig, symbol)
@@ -138,7 +148,7 @@ async def main() -> None:
         try:
             await bot.send_message(
                 config.CHAT_ID,
-                f"Бот запущен: {', '.join(config.SYMBOLS)} {config.TIMEFRAME}",
+                f"Бот запущен: {len(config.SYMBOLS)} пар, ТФ {config.TIMEFRAME}",
             )
         except Exception:
             logging.exception(
