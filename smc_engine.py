@@ -3,19 +3,19 @@ from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
-import pandas_ta_classic as ta  # Требуется: pip install pandas_ta
+import pandas_ta as ta
 
-OB_LOOKBACK = 50  # на сколько баров назад искать противоположную свечу
+OB_LOOKBACK = 50
 
 
 @dataclass
 class OrderBlock:
-    direction: str  # "long" (бычий OB) или "short" (медвежий OB)
+    direction: str
     top: float
     bottom: float
     time: pd.Timestamp
     active: bool = True
-    used: bool = False  # один OB — один сигнал
+    used: bool = False
 
     @property
     def uid(self) -> str:
@@ -36,10 +36,10 @@ class Signal:
     time: pd.Timestamp
     math_tp: float = 0.0
     logical_tp: float = 0.0
+    timeframe: str = ""  # <-- Добавлено поле для ТФ
 
 
 def _find_order_block(o, h, l, c, times, t: int, direction: str) -> OrderBlock | None:
-    """Последняя противоположная свеча перед свечой пробоя t."""
     for i in range(t - 1, max(t - OB_LOOKBACK, 0) - 1, -1):
         bearish = c[i] < o[i]
         bullish = c[i] > o[i]
@@ -52,10 +52,9 @@ def analyze(
     df: pd.DataFrame, 
     df_htf: pd.DataFrame, 
     swing_period: int = 5, 
-    rr: float = 2.0, 
+    rr: float = 3.0, 
     tick: float = 0.01
 ) -> list[Signal]:
-    """Проходит по свечам и возвращает сигналы с учетом фильтров."""
     half = max(1, swing_period // 2)
     o = df["Open"].to_numpy(float)
     h = df["High"].to_numpy(float)
@@ -64,15 +63,14 @@ def analyze(
     v = df["Volume"].to_numpy(float)
     times = df.index
 
-    # --- ПОДГОТОВКА ФИЛЬТРОВ ---
-    # 1. Тренд по старшему ТФ (4H, EMA 20)
+    # 1. Тренд по старшему ТФ (EMA 20)
     ema_htf = df_htf['Close'].ewm(span=20, adjust=False).mean().iloc[-1]
     htf_close = df_htf['Close'].iloc[-1]
     htf_trend = "long" if htf_close > ema_htf else "short"
 
-    # 2. ATR для безопасного стоп-лосса
+    # 2. ATR для стопа
     atr_series = ta.atr(df['High'], df['Low'], df['Close'], length=14)
-    # 3. Средний объем для фильтра всплеска
+    # 3. Средний объем
     avg_vol_series = df['Volume'].rolling(window=20).mean()
 
     last_sh: float | None = None
@@ -82,7 +80,6 @@ def analyze(
     signals: list[Signal] = []
 
     for t in range(len(df)):
-        # 1. Подтверждение свинга
         k = t - half
         if k >= half:
             if np.sum(h[k - half : t + 1] >= h[k]) == 1:
@@ -90,11 +87,9 @@ def analyze(
             if np.sum(l[k - half : t + 1] <= l[k]) == 1:
                 last_sl = float(l[k])
 
-        # 2. Ретест активных OB с фильтрами
         for ob in obs:
             if not ob.active or ob.used:
                 continue
-            
             if ob.direction != htf_trend:
                 continue
 
@@ -103,6 +98,7 @@ def analyze(
                     ob.active = False
                     continue
                 if trend == 1 and l[t] <= ob.top:
+                    # Фильтр объема
                     if pd.isna(avg_vol_series.iloc[t]) or v[t] < avg_vol_series.iloc[t] * 1.5:
                         continue
 
@@ -113,11 +109,9 @@ def analyze(
                     if entry > sl:
                         math_tp = entry + rr * (entry - sl)
                         logical_tp = last_sh + (last_sh * 0.001) if last_sh else math_tp
-                        
-                        # Выбираем более близкую цель
                         tp = logical_tp if (logical_tp < math_tp and logical_tp > entry) else math_tp
                         
-                        # СТРОГИЙ ФИЛЬТР R:R (не менее 1:3)
+                        # Строгий R:R 1:3
                         current_rr = (tp - entry) / (entry - sl)
                         if current_rr < 3.0:  
                             continue
@@ -126,11 +120,12 @@ def analyze(
                                               ob.top, ob.bottom, ob.time, times[t],
                                               math_tp=math_tp, logical_tp=logical_tp))
                         ob.used = True
-            else: # SHORT
+            else:
                 if c[t] > ob.top:
                     ob.active = False
                     continue
                 if trend == -1 and h[t] >= ob.bottom:
+                    # Фильтр объема
                     if pd.isna(avg_vol_series.iloc[t]) or v[t] < avg_vol_series.iloc[t] * 1.5:
                         continue
 
@@ -141,10 +136,9 @@ def analyze(
                     if entry < sl:
                         math_tp = entry - rr * (sl - entry)
                         logical_tp = last_sl - (last_sl * 0.001) if last_sl else math_tp
-                        
                         tp = logical_tp if (logical_tp > math_tp and logical_tp < entry) else math_tp
                         
-                        # СТРОГИЙ ФИЛЬТР R:R (не менее 1:3)
+                        # Строгий R:R 1:3
                         current_rr = (entry - tp) / (sl - entry)
                         if current_rr < 3.0:  
                             continue
@@ -154,7 +148,6 @@ def analyze(
                                               math_tp=math_tp, logical_tp=logical_tp))
                         ob.used = True
 
-        # 3. BOS / CHoCH
         if last_sh is not None and c[t] > last_sh:
             ob = _find_order_block(o, h, l, c, times, t, "long")
             if ob:
