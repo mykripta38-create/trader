@@ -32,7 +32,7 @@ def _build_chart(df: pd.DataFrame, sig: Signal, symbol: str) -> bytes:
         returnfig=True,
         datetime_format="%d.%m %H:%M",
         xrotation=0,
-        title=f"\n{symbol} {config.TIMEFRAME} — {'LONG' if is_long else 'SHORT'}",
+                title=f"\n{symbol} {sig.timeframe} — {'LONG' if is_long else 'SHORT'}",
     )
     ax = axes[0]
 
