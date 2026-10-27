@@ -29,6 +29,19 @@ def save_sent(sent: set[str]) -> None:
     SENT_FILE.write_text(json.dumps(sorted(sent)[-500:]), encoding="utf-8")
 
 
+def format_price(price: float) -> str:
+    """Умное форматирование цены в зависимости от её размера."""
+    if price == 0:
+        return "0"
+    if price < 0.001:
+        return f"{price:,.6f}"
+    if price < 1:
+        return f"{price:,.5f}"  # Для ADA, XRP, DOGE
+    if price < 100:
+        return f"{price:,.3f}"  # Для SOL, UNI, LINK, LTC
+    return f"{price:,.2f}"      # Для BTC, ETH
+
+
 def format_signal(sig: Signal, symbol: str) -> str:
     is_long = sig.direction == "long"
     risk_pct = abs(sig.entry - sig.sl) / sig.entry * 100
@@ -41,30 +54,40 @@ def format_signal(sig: Signal, symbol: str) -> str:
     return (
         f"{'🟢' if is_long else '🔴'} <b>{'LONG' if is_long else 'SHORT'} "
         f"{symbol}</b> ({sig.timeframe})\n\n"
-        f"Вход: <b>{sig.entry:,.2f}</b>\n"
-        f"Stop-Loss: <b>{sig.sl:,.2f}</b>\n"
-        f"Take-Profit: <b>{sig.tp:,.2f}</b>\n"
+        f"Вход: <b>{format_price(sig.entry)}</b>\n"
+        f"Stop-Loss: <b>{format_price(sig.sl)}</b>\n"
+        f"Take-Profit: <b>{format_price(sig.tp)}</b>\n"
         f"R:R = 1:{actual_rr:.2f} | риск {risk_pct:.2f}%\n\n"
         f"<i>Цели:</i>\n"
-        f"├ Логическая (свинг): {sig.logical_tp:,.2f}\n"
-        f"└ Математическая (1:{sig.rr:g}): {sig.math_tp:,.2f}\n\n"
-        f"Order Block: {sig.ob_bottom:,.2f} – {sig.ob_top:,.2f}\n"
+        f"├ Логическая (свинг): {format_price(sig.logical_tp)}\n"
+        f"└ Математическая (1:{sig.rr:g}): {format_price(sig.math_tp)}\n\n"
+        f"Order Block: {format_price(sig.ob_bottom)} – {format_price(sig.ob_top)}\n"
         f"Свеча ретеста (UTC): {sig.time:%Y-%m-%d %H:%M}"
     )
 
 
 async def send_signal(bot: Bot, df, sig: Signal, symbol: str) -> None:
     text = format_signal(sig, symbol)
-    await bot.send_message(config.CHAT_ID, text)
-    state.last_signal_text = text
-    state.signals_sent += 1
+    
+    # 1. Отправляем текст с защитой от ошибок
+    try:
+        await bot.send_message(config.CHAT_ID, text, parse_mode=ParseMode.HTML)
+        state.last_signal_text = text
+        state.signals_sent += 1
+    except Exception as e:
+        logging.error(f"❌ Ошибка при отправке ТЕКСТА сигнала {symbol}: {e}")
+        # Даже если текст не ушел, мы продолжаем, чтобы отправить график
+
+    # 2. Отправляем график
     try:
         img = await render_chart(df, sig, symbol)
         await bot.send_photo(
-            config.CHAT_ID, BufferedInputFile(img, filename="signal.png")
+            config.CHAT_ID, 
+            BufferedInputFile(img, filename="signal.png"),
+            caption=f"{symbol} {sig.timeframe} — {'LONG' if sig.direction == 'long' else 'SHORT'}"
         )
-    except Exception:
-        logging.exception(f"Не удалось построить или отправить график {symbol}")
+    except Exception as e:
+        logging.error(f"❌ Ошибка при отправке ГРАФИКА {symbol}: {e}")
 
 
 last_signal_time = {}
