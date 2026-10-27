@@ -11,6 +11,7 @@ from aiogram.types import BufferedInputFile
 
 import config
 from binance_data import BinanceData
+from bybit_trader import BybitTrader
 from chart import render_chart
 from handlers import router, state
 from smc_engine import Signal, analyze
@@ -66,33 +67,32 @@ def format_signal(sig: Signal, symbol: str) -> str:
     )
 
 
-async def send_signal(bot: Bot, df, sig: Signal, symbol: str) -> None:
+async def send_signal(bot: Bot, df, sig: Signal, symbol: str, trader: BybitTrader) -> None:
     text = format_signal(sig, symbol)
     
-    # 1. Отправляем текст с защитой от ошибок
+    # 1. Отправляем текст
     try:
         await bot.send_message(config.CHAT_ID, text, parse_mode=ParseMode.HTML)
         state.last_signal_text = text
         state.signals_sent += 1
     except Exception as e:
-        logging.error(f"❌ Ошибка при отправке ТЕКСТА сигнала {symbol}: {e}")
-        # Даже если текст не ушел, мы продолжаем, чтобы отправить график
+        logging.error(f"❌ Ошибка при отправке ТЕКСТА: {e}")
 
     # 2. Отправляем график
     try:
         img = await render_chart(df, sig, symbol)
-        await bot.send_photo(
-            config.CHAT_ID, 
-            BufferedInputFile(img, filename="signal.png"),
-            caption=f"{symbol} {sig.timeframe} — {'LONG' if sig.direction == 'long' else 'SHORT'}"
-        )
+        await bot.send_photo(config.CHAT_ID, BufferedInputFile(img, filename="signal.png"))
     except Exception as e:
-        logging.error(f"❌ Ошибка при отправке ГРАФИКА {symbol}: {e}")
+        logging.error(f"❌ Ошибка при отправке ГРАФИКА: {e}")
+
+    # 3. Выставляем ордер на Bybit Demo
+    if config.BYBIT_API_KEY:
+        await trader.create_trade(symbol, sig.direction, sig.entry, sig.sl, sig.tp)
 
 
 last_signal_time = {}
 
-async def signal_loop(bot: Bot, data: BinanceData, symbol: str) -> None:
+async def signal_loop(bot: Bot, data: BinanceData, symbol: str, trader: BybitTrader) -> None:
     """Фоновый цикл: проверяем 15m и 1h одновременно."""
     sent = load_sent()
     last_ts_15m = None
@@ -148,7 +148,7 @@ async def signal_loop(bot: Bot, data: BinanceData, symbol: str) -> None:
                 if current_time - last_time < 3600:
                     continue
 
-                await send_signal(bot, df_source, sig, symbol)
+                await send_signal(bot, df_source, sig, symbol, trader)
                 
                 last_signal_time[cooldown_key] = current_time
                 sent.add(key)
@@ -169,8 +169,9 @@ async def main() -> None:
     dp = Dispatcher()
     dp.include_router(router)
     data = BinanceData()
+    trader = BybitTrader()
 
-    tasks = [asyncio.create_task(signal_loop(bot, data, sym)) for sym in config.SYMBOLS]
+    tasks = [asyncio.create_task(signal_loop(bot, data, sym, trader)) for sym in config.SYMBOLS]
 
     try:
         try:
@@ -191,6 +192,7 @@ async def main() -> None:
             t.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         await data.close()
+        await trader.close()
         await bot.session.close()
 
 
