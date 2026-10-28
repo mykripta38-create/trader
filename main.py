@@ -97,9 +97,27 @@ async def signal_loop(bot: Bot, data: BinanceData, symbol: str, trader: BybitTra
     sent = load_sent()
     last_ts_15m = None
     last_ts_1h = None
-    last_manage_time = 0
+    last_manage_time = 0  # Время последней проверки смотрителя
     
-    last_manage_time = 0
+    while True:
+        try:
+            # --- СМОТРИТЕЛЬ ОРДЕРОВ (раз в 15 минут) ---
+            current_time = time.time()
+            if current_time - last_manage_time > 900: # 900 секунд = 15 минут
+                await trader.manage_orders(symbol)
+                
+                # Проверяем позиции и отправляем уведомления, если есть проблемы
+                warnings = await trader.check_positions_tpsl(symbol)
+                for warn in warnings:
+                    try:
+                        await bot.send_message(config.CHAT_ID, warn, parse_mode=ParseMode.HTML)
+                    except Exception as e:
+                        logging.error(f"Не удалось отправить уведомление о голой позиции: {e}")
+                        
+                last_manage_time = current_time
+            # -------------------------------------------
+
+            # 1. Запрашиваем свечи для всех трех ТФ
             df_15m = await data.fetch_closed_candles(symbol, timeframe="15m")
             df_1h = await data.fetch_closed_candles(symbol, timeframe="1h")
             df_4h = await data.fetch_closed_candles(symbol, timeframe="4h")
@@ -142,7 +160,6 @@ async def signal_loop(bot: Bot, data: BinanceData, symbol: str, trader: BybitTra
 
                 # Cooldown 1 час (отдельно для 15m и 1h по каждой паре)
                 cooldown_key = f"{symbol}_{sig.timeframe}"
-                current_time = time.time()
                 last_time = last_signal_time.get(cooldown_key, 0)
                 if current_time - last_time < 3600:
                     continue
