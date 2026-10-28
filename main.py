@@ -97,10 +97,9 @@ async def signal_loop(bot: Bot, data: BinanceData, symbol: str, trader: BybitTra
     sent = load_sent()
     last_ts_15m = None
     last_ts_1h = None
+    last_manage_time = 0
     
-    while True:
-        try:
-            # 1. Запрашиваем свечи для всех трех ТФ
+    last_manage_time = 0
             df_15m = await data.fetch_closed_candles(symbol, timeframe="15m")
             df_1h = await data.fetch_closed_candles(symbol, timeframe="1h")
             df_4h = await data.fetch_closed_candles(symbol, timeframe="4h")
