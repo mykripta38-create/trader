@@ -15,7 +15,6 @@ from aiogram.types import BufferedInputFile
 import config
 from binance_data import BinanceData
 from bybit_trader import BybitTrader
-from chart import render_chart
 from handlers import router, state
 from smc_engine import Signal, analyze
 
@@ -68,6 +67,7 @@ def format_signal(sig: Signal, symbol: str) -> str:
 async def send_signal(bot: Bot, df, sig: Signal, symbol: str, trader: BybitTrader) -> None:
     text = format_signal(sig, symbol)
     
+    # 1. Отправляем текст
     try:
         await bot.send_message(config.CHAT_ID, text, parse_mode=ParseMode.HTML)
         state.last_signal_text = text
@@ -75,12 +75,14 @@ async def send_signal(bot: Bot, df, sig: Signal, symbol: str, trader: BybitTrade
     except Exception as e:
         logging.error(f"❌ Ошибка при отправке ТЕКСТА: {e}")
 
-    try:
-        img = await render_chart(df, sig, symbol)
-        await bot.send_photo(config.CHAT_ID, BufferedInputFile(img, filename="signal.png"))
-    except Exception as e:
-        logging.error(f"❌ Ошибка при отправке ГРАФИКА: {e}")
+    # 2. Графики отключены для экономии памяти!
+    # try:
+    #     img = await render_chart(df, sig, symbol)
+    #     await bot.send_photo(config.CHAT_ID, BufferedInputFile(img, filename="signal.png"))
+    # except Exception as e:
+    #     logging.error(f"❌ Ошибка при отправке ГРАФИКА: {e}")
 
+    # 3. Выставляем ордер на Bybit Demo
     if config.BYBIT_API_KEY:
         await trader.create_trade(symbol, sig.direction, sig.entry, sig.sl, sig.tp)
 
