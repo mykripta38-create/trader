@@ -2,9 +2,11 @@
 import asyncio
 import json
 import logging
+import os
 import time
 from datetime import datetime, timezone
 
+from aiohttp import web  # <-- Для Keep-Alive сервера
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
@@ -97,9 +99,13 @@ async def signal_loop(bot: Bot, data: BinanceData, symbol: str, trader: BybitTra
             
             # --- ТРЕЙЛИНГ-СТОП (раз в 5 минут) ---
             if current_time - last_trailing_time > 300:
-                await trader.check_trailing_stop(symbol)
+                trailing_msgs = await trader.check_trailing_stop(symbol)
+                for msg in trailing_msgs:
+                    try:
+                        await bot.send_message(config.CHAT_ID, msg, parse_mode=ParseMode.HTML)
+                    except Exception as e:
+                        logging.error(f"Ошибка отправки уведомления о трейлинге: {e}")
                 last_trailing_time = current_time
-            # -------------------------------------
 
             df_15m = await data.fetch_closed_candles(symbol, timeframe="15m")
             df_1h = await data.fetch_closed_candles(symbol, timeframe="1h")
@@ -107,7 +113,7 @@ async def signal_loop(bot: Bot, data: BinanceData, symbol: str, trader: BybitTra
 
             all_signals = []
 
-            # 2. Анализ 15m (фильтр: 1h) + Двойной EMA на 15m
+            # 2. Анализ 15m (фильтр: 1h) + Двойной EMA
             if last_ts_15m is None or df_15m.index[-1] > last_ts_15m:
                 ema20 = df_15m['Close'].ewm(span=20, adjust=False).mean().iloc[-1]
                 ema50 = df_15m['Close'].ewm(span=50, adjust=False).mean().iloc[-1]
@@ -124,7 +130,7 @@ async def signal_loop(bot: Bot, data: BinanceData, symbol: str, trader: BybitTra
                             all_signals.append((s, df_15m))
                 last_ts_15m = df_15m.index[-1]
 
-            # 3. Анализ 1h (фильтр: 4h) + Двойной EMA на 1h
+            # 3. Анализ 1h (фильтр: 4h) + Двойной EMA
             if last_ts_1h is None or df_1h.index[-1] > last_ts_1h:
                 ema20_h = df_1h['Close'].ewm(span=20, adjust=False).mean().iloc[-1]
                 ema50_h = df_1h['Close'].ewm(span=50, adjust=False).mean().iloc[-1]
@@ -173,8 +179,8 @@ async def signal_loop(bot: Bot, data: BinanceData, symbol: str, trader: BybitTra
             logging.exception(f"Ошибка в цикле проверки ({symbol})")
         await asyncio.sleep(config.CHECK_INTERVAL)
 
+
 async def daily_report(bot: Bot):
-    """Отправляет отчет каждый день в 00:00 UTC."""
     while True:
         now = datetime.now(timezone.utc)
         seconds_until_midnight = (24 - now.hour - 1) * 3600 + (60 - now.minute - 1) * 60 + (60 - now.second)
@@ -192,8 +198,31 @@ async def daily_report(bot: Bot):
         except Exception as e:
             logging.error(f"Ошибка отправки отчета: {e}")
 
+
+# --- KEEP-ALIVE СЕРВЕР ДЛЯ INF RLO ---
+async def start_health_server():
+    async def health_check(request):
+        return web.Response(text="OK", status=200)
+    
+    app = web.Application()
+    app.router.add_get('/', health_check)
+    app.router.add_get('/health', health_check)
+    
+    # Infrlo передает порт в переменной окружения PORT, если нет — используем 8080
+    port = int(os.getenv("PORT", 8080))
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    await site.start()
+    logging.info(f"🌐 Keep-Alive сервер запущен на порту {port}")
+
+
 async def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    
+    # Запускаем веб-сервер, чтобы Infrlo не убивал бота
+    await start_health_server()
+    
     bot = Bot(token=config.BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher()
     dp.include_router(router)
