@@ -41,9 +41,10 @@ class BybitTrader:
             logging.error(f"❌ Ошибка при создании ордера на Bybit: {e}")
             return None
 
-    async def check_trailing_stop(self, symbol: str):
+    async def check_trailing_stop(self, symbol: str) -> list[str]:
         """Проверяет позиции и переводит стоп в безубыток при достижении 1:1.5."""
         trade_symbol = f"{symbol}:USDT" if ":" not in symbol else symbol
+        notifications = []
         try:
             positions = await self.exchange.fetch_positions([trade_symbol])
             for pos in positions:
@@ -52,7 +53,6 @@ class BybitTrader:
                     sl = float(pos['info'].get('stopLoss', 0))
                     tp = float(pos['info'].get('takeProfit', 0))
                     
-                    # Если уже в безубытке или не задан TP, пропускаем
                     if sl == 0 or tp == 0 or (pos['side'] == 'long' and sl >= entry) or (pos['side'] == 'short' and sl <= entry):
                         continue
                         
@@ -68,16 +68,23 @@ class BybitTrader:
                         
                     rr = profit / risk if risk > 0 else 0
                     
-                    # Если профит превысил 1:1.5, двигаем стоп в безубыток (entry)
                     if rr >= config.TRAILING_TRIGGER_RR:
                         new_sl = entry
                         await self.exchange.set_trading_stop(
                             symbol=trade_symbol,
                             params={'stopLoss': new_sl, 'positionIdx': 0}
                         )
-                        logging.info(f"🛡️ Трейлинг-стоп: {trade_symbol} переведен в безубыток ({new_sl}) при R:R {rr:.2f}")
+                        msg = (
+                            f"🛡️ <b>Трейлинг-стоп сработал!</b>\n"
+                            f"Пара: {trade_symbol}\n"
+                            f"Профит достиг 1:{rr:.2f}. Стоп передвинут в безубыток ({new_sl})."
+                        )
+                        logging.info(msg)
+                        notifications.append(msg)
         except Exception as e:
             logging.error(f"❌ Ошибка трейлинг-стопа для {symbol}: {e}")
+            
+        return notifications
 
     async def close(self):
         await self.exchange.close()
