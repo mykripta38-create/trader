@@ -1,76 +1,74 @@
-"""График сигнала: свечи, Order Block, вход, Stop-Loss, Take-Profit."""
+"""Облегченный график сигнала на чистом matplotlib."""
 import asyncio
 import io
-
+import gc
 import matplotlib
 
-matplotlib.use("Agg")  # без окон, только в файл
-import matplotlib.pyplot as plt  # noqa: E402
-import mplfinance as mpf  # noqa: E402
-import pandas as pd  # noqa: E402
-from matplotlib.patches import Rectangle  # noqa: E402
+matplotlib.use("Agg")  # Без окон
+import matplotlib.pyplot as plt
+import pandas as pd
+from matplotlib.patches import Rectangle
 
-import config  # noqa: E402
-from smc_engine import Signal  # noqa: E402
+import config
+from smc_engine import Signal
 
-PAD = 14  # пустое место справа под подписи уровней
+PAD = 5  # Минимальный отступ справа
 
 
-def _build_chart(df: pd.DataFrame, sig: Signal, symbol: str) -> bytes:
-    view = df.loc[: sig.time].tail(config.CHART_CANDLES)
+def _build_light_chart(df: pd.DataFrame, sig: Signal, symbol: str) -> bytes:
+    # Берем только последние 40 свечей для экономии памяти
+    view = df.loc[: sig.time].tail(40) 
     n = len(view)
     is_long = sig.direction == "long"
 
-    colors = mpf.make_marketcolors(up="#26a69a", down="#ef5350", edge="inherit", wick="inherit")
-    style = mpf.make_mpf_style(base_mpf_style="nightclouds", marketcolors=colors)
+    # Создаем фигуру минимального размера
+    fig, ax = plt.subplots(figsize=(6, 6), dpi=80) 
+    
+    # Рисуем свечи вручную (циклом)
+    for i, (idx, row) in enumerate(view.iterrows()):
+        color = "#26a69a" if row['Close'] >= row['Open'] else "#ef5350"
+        # Тень (фитиль)
+        ax.plot([i, i], [row['Low'], row['High']], color=color, linewidth=1)
+        # Тело свечи
+        rect = Rectangle((i - 0.3, min(row['Open'], row['Close'])), 0.6, abs(row['Close'] - row['Open']),
+                         facecolor=color, edgecolor=color)
+        ax.add_patch(rect)
 
-    fig, axes = mpf.plot(
-        view,
-        type="candle",
-        style=style,
-        figsize=(8, 10),  # вертикальный формат — удобно на телефоне
-        returnfig=True,
-        datetime_format="%d.%m %H:%M",
-        xrotation=0,
-                title=f"\n{symbol} {sig.timeframe} — {'LONG' if is_long else 'SHORT'}",
-    )
-    ax = axes[0]
-
-    # Order Block — прямоугольник от свечи OB до правого края
+    # Order Block
     x0 = view.index.get_loc(sig.ob_time) if sig.ob_time in view.index else 0
     ax.add_patch(Rectangle((x0 - 0.5, sig.ob_bottom), n + PAD - x0, sig.ob_top - sig.ob_bottom,
-                           facecolor="#2962ff", alpha=0.30, edgecolor="#2962ff", zorder=1))
-    ax.text(x0, sig.ob_top, " Order Block", color="#82b1ff", fontsize=11,
-            fontweight="bold", va="bottom")
+                           facecolor="#2962ff", alpha=0.3, edgecolor="#2962ff", zorder=1))
 
-    # Уровни входа, SL и TP
-    levels = [
-        (sig.entry, "#ffd54f", f"ENTRY {sig.entry:,.1f}"),
-        (sig.sl, "#ef5350", f"SL {sig.sl:,.1f}"),
-        (sig.tp, "#26a69a", f"TP {sig.tp:,.1f}"),
-    ]
-    for price, color, label in levels:
-        ax.axhline(price, color=color, linestyle="--", linewidth=1.4, zorder=3)
-        ax.text(n - 0.3, price, label, color=color, fontsize=11,
-                fontweight="bold", va="bottom", ha="left")
+    # Уровни
+    ax.axhline(sig.entry, color="#ffd54f", linestyle="--", linewidth=1.5, label="Entry")
+    ax.axhline(sig.sl, color="#ef5350", linestyle="--", linewidth=1.5, label="SL")
+    ax.axhline(sig.tp, color="#26a69a", linestyle="--", linewidth=1.5, label="TP")
 
-    # Точка входа на свече ретеста
-    ax.scatter([n - 1], [sig.entry], marker="^" if is_long else "v", s=180,
-               color="#ffd54f", edgecolors="black", zorder=5)
-
-    # Границы осей, чтобы SL и TP точно попали в кадр
+    ax.set_title(f"{symbol} {sig.timeframe} — {'LONG' if is_long else 'SHORT'}", fontsize=10, color="white")
+    ax.set_xlim(-1, n + PAD)
+    
+    # Границы Y
     lo = min(float(view["Low"].min()), sig.sl, sig.tp)
     hi = max(float(view["High"].max()), sig.sl, sig.tp)
     margin = (hi - lo) * 0.05
-    ax.set_xlim(-1, n + PAD)
     ax.set_ylim(lo - margin, hi + margin)
 
+    # Темный стиль
+    fig.patch.set_facecolor('#1e222d')
+    ax.set_facecolor('#1e222d')
+    ax.tick_params(colors='white', labelsize=8)
+    ax.spines['bottom'].set_color('white')
+    ax.spines['top'].set_color('white')
+    ax.spines['left'].set_color('white')
+    ax.spines['right'].set_color('white')
+    ax.grid(True, color='#363c4e', linestyle='--', linewidth=0.5)
+    
     buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=130, bbox_inches="tight")
-    plt.close(fig)
+    fig.savefig(buf, format="png", bbox_inches="tight")
+    plt.close(fig)  # Закрываем фигуру, чтобы освободить память
+    gc.collect()    # Принудительно вызываем сборщик мусора
     return buf.getvalue()
 
 
 async def render_chart(df: pd.DataFrame, sig: Signal, symbol: str) -> bytes:
-    """Рисуем в отдельном потоке, чтобы не блокировать event loop."""
-    return await asyncio.to_thread(_build_chart, df, sig, symbol)
+    return await asyncio.to_thread(_build_light_chart, df, sig, symbol)
