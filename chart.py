@@ -17,7 +17,7 @@ PAD = 5  # Минимальный отступ справа
 
 def _build_light_chart(df: pd.DataFrame, sig: Signal, symbol: str) -> bytes:
     # Берем только последние 40 свечей для экономии памяти
-    view = df.loc[: sig.time].tail(40) 
+    view = df.loc[: sig.time].tail(30) 
     n = len(view)
     is_long = sig.direction == "long"
 
