@@ -3,6 +3,7 @@ import asyncio
 import json
 import logging
 import time
+from datetime import datetime, timezone
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
@@ -31,16 +32,11 @@ def save_sent(sent: set[str]) -> None:
 
 
 def format_price(price: float) -> str:
-    """Умное форматирование цены в зависимости от её размера."""
-    if price == 0:
-        return "0"
-    if price < 0.001:
-        return f"{price:,.6f}"
-    if price < 1:
-        return f"{price:,.5f}"  # Для ADA, XRP, DOGE
-    if price < 100:
-        return f"{price:,.3f}"  # Для SOL, UNI, LINK, LTC
-    return f"{price:,.2f}"      # Для BTC, ETH
+    if price == 0: return "0"
+    if price < 0.001: return f"{price:,.6f}"
+    if price < 1: return f"{price:,.5f}"
+    if price < 100: return f"{price:,.3f}"
+    return f"{price:,.2f}"
 
 
 def format_signal(sig: Signal, symbol: str) -> str:
@@ -70,7 +66,6 @@ def format_signal(sig: Signal, symbol: str) -> str:
 async def send_signal(bot: Bot, df, sig: Signal, symbol: str, trader: BybitTrader) -> None:
     text = format_signal(sig, symbol)
     
-    # 1. Отправляем текст
     try:
         await bot.send_message(config.CHAT_ID, text, parse_mode=ParseMode.HTML)
         state.last_signal_text = text
@@ -78,14 +73,12 @@ async def send_signal(bot: Bot, df, sig: Signal, symbol: str, trader: BybitTrade
     except Exception as e:
         logging.error(f"❌ Ошибка при отправке ТЕКСТА: {e}")
 
-    # 2. Отправляем график
     try:
         img = await render_chart(df, sig, symbol)
         await bot.send_photo(config.CHAT_ID, BufferedInputFile(img, filename="signal.png"))
     except Exception as e:
         logging.error(f"❌ Ошибка при отправке ГРАФИКА: {e}")
 
-    # 3. Выставляем ордер на Bybit Demo
     if config.BYBIT_API_KEY:
         await trader.create_trade(symbol, sig.direction, sig.entry, sig.sl, sig.tp)
 
@@ -93,45 +86,65 @@ async def send_signal(bot: Bot, df, sig: Signal, symbol: str, trader: BybitTrade
 last_signal_time = {}
 
 async def signal_loop(bot: Bot, data: BinanceData, symbol: str, trader: BybitTrader) -> None:
-    """Фоновый цикл: проверяем 15m и 1h одновременно."""
     sent = load_sent()
     last_ts_15m = None
     last_ts_1h = None
+    last_trailing_time = 0
     
     while True:
         try:
-            # 1. Запрашиваем свечи для всех трех ТФ
+            current_time = time.time()
+            
+            # --- ТРЕЙЛИНГ-СТОП (раз в 5 минут) ---
+            if current_time - last_trailing_time > 300:
+                await trader.check_trailing_stop(symbol)
+                last_trailing_time = current_time
+            # -------------------------------------
+
             df_15m = await data.fetch_closed_candles(symbol, timeframe="15m")
             df_1h = await data.fetch_closed_candles(symbol, timeframe="1h")
             df_4h = await data.fetch_closed_candles(symbol, timeframe="4h")
 
             all_signals = []
 
-            # 2. Анализ 15m (фильтр: 1h)
+            # 2. Анализ 15m (фильтр: 1h) + Двойной EMA на 15m
             if last_ts_15m is None or df_15m.index[-1] > last_ts_15m:
-                sigs_15m = await asyncio.to_thread(
-                    analyze, df_15m, df_1h, config.SWING_PERIOD, config.RISK_REWARD, config.TICK_SIZE
-                )
-                for s in sigs_15m:
-                    s.timeframe = "15m"
-                    all_signals.append((s, df_15m))
+                ema20 = df_15m['Close'].ewm(span=20, adjust=False).mean().iloc[-1]
+                ema50 = df_15m['Close'].ewm(span=50, adjust=False).mean().iloc[-1]
+                close_15m = df_15m['Close'].iloc[-1]
+                trend_15m = "long" if (close_15m > ema20 and ema20 > ema50) else ("short" if (close_15m < ema20 and ema20 < ema50) else "none")
+
+                if trend_15m != "none":
+                    sigs_15m = await asyncio.to_thread(
+                        analyze, df_15m, df_1h, config.SWING_PERIOD, config.RISK_REWARD, config.TICK_SIZE
+                    )
+                    for s in sigs_15m:
+                        if s.direction == trend_15m:
+                            s.timeframe = "15m"
+                            all_signals.append((s, df_15m))
                 last_ts_15m = df_15m.index[-1]
 
-            # 3. Анализ 1h (фильтр: 4h)
+            # 3. Анализ 1h (фильтр: 4h) + Двойной EMA на 1h
             if last_ts_1h is None or df_1h.index[-1] > last_ts_1h:
-                sigs_1h = await asyncio.to_thread(
-                    analyze, df_1h, df_4h, config.SWING_PERIOD, config.RISK_REWARD, config.TICK_SIZE
-                )
-                for s in sigs_1h:
-                    s.timeframe = "1h"
-                    all_signals.append((s, df_1h))
+                ema20_h = df_1h['Close'].ewm(span=20, adjust=False).mean().iloc[-1]
+                ema50_h = df_1h['Close'].ewm(span=50, adjust=False).mean().iloc[-1]
+                close_1h = df_1h['Close'].iloc[-1]
+                trend_1h = "long" if (close_1h > ema20_h and ema20_h > ema50_h) else ("short" if (close_1h < ema20_h and ema20_h < ema50_h) else "none")
+
+                if trend_1h != "none":
+                    sigs_1h = await asyncio.to_thread(
+                        analyze, df_1h, df_4h, config.SWING_PERIOD, config.RISK_REWARD, config.TICK_SIZE
+                    )
+                    for s in sigs_1h:
+                        if s.direction == trend_1h:
+                            s.timeframe = "1h"
+                            all_signals.append((s, df_1h))
                 last_ts_1h = df_1h.index[-1]
 
             # 4. Фильтрация и отправка
             for sig, df_source in all_signals:
                 key = f"{symbol}_{sig.timeframe}_{sig.uid}"
                 
-                # Проверка на свежесть
                 fresh = False
                 if sig.timeframe == "15m":
                     fresh = (sig.time == df_15m.index[-1] if last_ts_15m else sig.time > (last_ts_15m or 0))
@@ -141,9 +154,7 @@ async def signal_loop(bot: Bot, data: BinanceData, symbol: str, trader: BybitTra
                 if not fresh or key in sent:
                     continue
 
-                # Cooldown 1 час (отдельно для 15m и 1h по каждой паре)
                 cooldown_key = f"{symbol}_{sig.timeframe}"
-                current_time = time.time()
                 last_time = last_signal_time.get(cooldown_key, 0)
                 if current_time - last_time < 3600:
                     continue
@@ -162,6 +173,24 @@ async def signal_loop(bot: Bot, data: BinanceData, symbol: str, trader: BybitTra
             logging.exception(f"Ошибка в цикле проверки ({symbol})")
         await asyncio.sleep(config.CHECK_INTERVAL)
 
+async def daily_report(bot: Bot):
+    """Отправляет отчет каждый день в 00:00 UTC."""
+    while True:
+        now = datetime.now(timezone.utc)
+        seconds_until_midnight = (24 - now.hour - 1) * 3600 + (60 - now.minute - 1) * 60 + (60 - now.second)
+        await asyncio.sleep(seconds_until_midnight)
+        
+        try:
+            text = (
+                f"📊 <b>Ежедневный отчет</b>\n"
+                f"Дата: {datetime.now(timezone.utc).strftime('%Y-%m-%d')}\n"
+                f"Отправлено сигналов (всего): {state.signals_sent}\n"
+                f"Последняя проверенная свеча: {state.last_candle}\n\n"
+                f"<i>Бот продолжает работу 24/7.</i>"
+            )
+            await bot.send_message(config.CHAT_ID, text, parse_mode=ParseMode.HTML)
+        except Exception as e:
+            logging.error(f"Ошибка отправки отчета: {e}")
 
 async def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -172,6 +201,7 @@ async def main() -> None:
     trader = BybitTrader()
 
     tasks = [asyncio.create_task(signal_loop(bot, data, sym, trader)) for sym in config.SYMBOLS]
+    tasks.append(asyncio.create_task(daily_report(bot)))
 
     try:
         try:
@@ -181,7 +211,7 @@ async def main() -> None:
 
         try:
             await bot.send_message(
-                config.CHAT_ID, f"Бот запущен (15m + 1h): {len(config.SYMBOLS)} пар"
+                config.CHAT_ID, f"Бот запущен (15m + 1h + EMA + Trailing): {len(config.SYMBOLS)} пар"
             )
         except Exception:
             logging.exception("Ошибка стартового сообщения")
