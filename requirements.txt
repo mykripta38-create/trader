@@ -1,8 +1,9 @@
 aiogram>=3.4,<4
 ccxt>=4.2
-pandas-ta-classic
+pandas>=2.0
 numpy>=1.24
 mplfinance>=0.12.10b0
 matplotlib>=3.7
 python-dotenv>=1.0
 pandas-ta-classic
+aiohttp
