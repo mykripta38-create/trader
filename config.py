@@ -24,7 +24,7 @@ SYMBOLS: list[str] = [
 
 TIMEFRAME: str = os.getenv("TIMEFRAME", "15m").strip()
 CHECK_INTERVAL: int = int(os.getenv("CHECK_INTERVAL", "60"))
-CANDLES_LIMIT: int = int(os.getenv("CANDLES_LIMIT", "300")) # 300, чтобы влезла EMA200
+CANDLES_LIMIT: int = int(os.getenv("CANDLES_LIMIT", "250"))
 SWING_PERIOD: int = int(os.getenv("SWING_PERIOD", "5"))
 RISK_REWARD: float = float(os.getenv("RISK_REWARD", "3.0"))
 TICK_SIZE: float = float(os.getenv("TICK_SIZE", "0.01"))
