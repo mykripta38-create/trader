@@ -55,8 +55,8 @@ def analyze(
     rr: float = 3.0, 
     tick: float = 0.01
 ) -> list[Signal]:
-    # --- НАДЕЖНАЯ ЗАЩИТА ОТ ПУСТЫХ ДАННЫХ ---
-    if df.empty or df_htf.empty or len(df) < 2 or len(df_htf) < 2:
+    # --- ЗАЩИТА ОТ ПУСТЫХ ДАННЫХ ---
+    if df.empty or df_htf.empty or len(df) < 2 or len(df_htf) < 200:
         return []
     if 'Close' not in df.columns or 'Close' not in df_htf.columns:
         return []
@@ -69,10 +69,20 @@ def analyze(
     v = df["Volume"].to_numpy(float)
     times = df.index
 
-    # 1. Тренд по старшему ТФ (EMA 20)
-    ema_htf = df_htf['Close'].ewm(span=20, adjust=False).mean().iloc[-1]
+    # 1. Тренд по старшему ТФ (Двойной EMA 50 и 200)
+    ema_fast = df_htf['Close'].ewm(span=50, adjust=False).mean().iloc[-1]
+    ema_slow = df_htf['Close'].ewm(span=200, adjust=False).mean().iloc[-1]
     htf_close = df_htf['Close'].iloc[-1]
-    htf_trend = "long" if htf_close > ema_htf else "short"
+    
+    if htf_close > ema_fast and htf_close > ema_slow and ema_fast > ema_slow:
+        htf_trend = "long"
+    elif htf_close < ema_fast and htf_close < ema_slow and ema_fast < ema_slow:
+        htf_trend = "short"
+    else:
+        htf_trend = "none" # Флэт — сигналы не берем
+
+    if htf_trend == "none":
+        return []
 
     # 2. ATR для стопа
     atr_series = ta.atr(df['High'], df['Low'], df['Close'], length=14)
@@ -104,7 +114,6 @@ def analyze(
                     ob.active = False
                     continue
                 if trend == 1 and l[t] <= ob.top:
-                    # Фильтр объема
                     if pd.isna(avg_vol_series.iloc[t]) or v[t] < avg_vol_series.iloc[t] * 1.5:
                         continue
 
@@ -117,7 +126,6 @@ def analyze(
                         logical_tp = last_sh + (last_sh * 0.001) if last_sh else math_tp
                         tp = logical_tp if (logical_tp < math_tp and logical_tp > entry) else math_tp
                         
-                        # Строгий R:R 1:3
                         current_rr = (tp - entry) / (entry - sl)
                         if current_rr < 3.0:  
                             continue
@@ -131,7 +139,6 @@ def analyze(
                     ob.active = False
                     continue
                 if trend == -1 and h[t] >= ob.bottom:
-                    # Фильтр объема
                     if pd.isna(avg_vol_series.iloc[t]) or v[t] < avg_vol_series.iloc[t] * 1.5:
                         continue
 
@@ -144,7 +151,6 @@ def analyze(
                         logical_tp = last_sl - (last_sl * 0.001) if last_sl else math_tp
                         tp = logical_tp if (logical_tp > math_tp and logical_tp < entry) else math_tp
                         
-                        # Строгий R:R 1:3
                         current_rr = (entry - tp) / (sl - entry)
                         if current_rr < 3.0:  
                             continue
