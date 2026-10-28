@@ -6,7 +6,7 @@ import os
 import time
 from datetime import datetime, timezone
 
-from aiohttp import web  # <-- Для Keep-Alive сервера
+from aiohttp import web
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
@@ -100,11 +100,12 @@ async def signal_loop(bot: Bot, data: BinanceData, symbol: str, trader: BybitTra
             # --- ТРЕЙЛИНГ-СТОП (раз в 5 минут) ---
             if current_time - last_trailing_time > 300:
                 trailing_msgs = await trader.check_trailing_stop(symbol)
-                for msg in trailing_msgs:
-                    try:
-                        await bot.send_message(config.CHAT_ID, msg, parse_mode=ParseMode.HTML)
-                    except Exception as e:
-                        logging.error(f"Ошибка отправки уведомления о трейлинге: {e}")
+                if trailing_msgs:
+                    for msg in trailing_msgs:
+                        try:
+                            await bot.send_message(config.CHAT_ID, msg, parse_mode=ParseMode.HTML)
+                        except Exception as e:
+                            logging.error(f"Ошибка отправки уведомления о трейлинге: {e}")
                 last_trailing_time = current_time
 
             df_15m = await data.fetch_closed_candles(symbol, timeframe="15m")
@@ -208,7 +209,6 @@ async def start_health_server():
     app.router.add_get('/', health_check)
     app.router.add_get('/health', health_check)
     
-    # Infrlo передает порт в переменной окружения PORT, если нет — используем 8080
     port = int(os.getenv("PORT", 8080))
     runner = web.AppRunner(app)
     await runner.setup()
