@@ -79,7 +79,7 @@ def analyze(
     elif htf_close < ema_fast and htf_close < ema_slow and ema_fast < ema_slow:
         htf_trend = "short"
     else:
-        htf_trend = "none" # Флэт — сигналы не берем
+        htf_trend = "none"
 
     if htf_trend == "none":
         return []
