@@ -16,13 +16,41 @@ class BybitTrader:
         self.exchange.enableDemoTrading(True)
         logging.info("Bybit Trader инициализирован в режиме Demo.")
 
+    async def get_balance(self) -> float:
+        """Получает доступный баланс USDT."""
+        try:
+            balance = await self.exchange.fetch_balance({'type': 'swap'})
+            if 'USDT' in balance['free']:
+                return float(balance['free']['USDT'])
+            return 0.0
+        except Exception as e:
+            logging.error(f"❌ Ошибка получения баланса: {e}")
+            return 0.0
+
     async def create_trade(self, symbol: str, direction: str, entry: float, sl: float, tp: float):
         side = 'buy' if direction == 'long' else 'sell'
         trade_symbol = f"{symbol}:USDT" if ":" not in symbol else symbol
         
-        try:
-            amount = 10.0 / entry  # Тестовый объем 10 USDT
+        # --- РАСЧЕТ РАЗМЕРА ПОЗИЦИИ ОТ РИСКА ---
+        balance = await self.get_balance()
+        if balance <= 0:
+            logging.error("❌ Баланс равен 0 или не получен. Ордер не создан.")
+            return None
+
+        risk_amount = balance * (config.RISK_PERCENT / 100.0)
+        stop_distance_pct = abs(entry - sl) / entry
+        
+        if stop_distance_pct == 0:
+            logging.error("❌ Расстояние до стопа равно 0.")
+            return None
             
+        position_size_usdt = risk_amount / stop_distance_pct
+        amount = position_size_usdt / entry
+        
+        logging.info(f"📊 Риск: ${risk_amount:.2f} ({config.RISK_PERCENT}%), Позиция: ${position_size_usdt:.2f} ({amount:.4f} монет)")
+        # ---------------------------------------
+
+        try:
             order = await self.exchange.create_order(
                 symbol=trade_symbol,
                 type='limit',
@@ -40,51 +68,6 @@ class BybitTrader:
         except Exception as e:
             logging.error(f"❌ Ошибка при создании ордера на Bybit: {e}")
             return None
-
-    async def check_trailing_stop(self, symbol: str) -> list[str]:
-        """Проверяет позиции и переводит стоп в безубыток при достижении 1:1.5."""
-        trade_symbol = f"{symbol}:USDT" if ":" not in symbol else symbol
-        notifications = []
-        try:
-            positions = await self.exchange.fetch_positions([trade_symbol])
-            for pos in positions:
-                if float(pos['contracts']) > 0:
-                    entry = float(pos['entryPrice'])
-                    sl = float(pos['info'].get('stopLoss', 0))
-                    tp = float(pos['info'].get('takeProfit', 0))
-                    
-                    if sl == 0 or tp == 0 or (pos['side'] == 'long' and sl >= entry) or (pos['side'] == 'short' and sl <= entry):
-                        continue
-                        
-                    ticker = await self.exchange.fetch_ticker(trade_symbol)
-                    current_price = ticker['last']
-                    
-                    if pos['side'] == 'long':
-                        risk = entry - sl
-                        profit = current_price - entry
-                    else:
-                        risk = sl - entry
-                        profit = entry - current_price
-                        
-                    rr = profit / risk if risk > 0 else 0
-                    
-                    if rr >= config.TRAILING_TRIGGER_RR:
-                        new_sl = entry
-                        await self.exchange.set_trading_stop(
-                            symbol=trade_symbol,
-                            params={'stopLoss': new_sl, 'positionIdx': 0}
-                        )
-                        msg = (
-                            f"🛡️ <b>Трейлинг-стоп сработал!</b>\n"
-                            f"Пара: {trade_symbol}\n"
-                            f"Профит достиг 1:{rr:.2f}. Стоп передвинут в безубыток ({new_sl})."
-                        )
-                        logging.info(msg)
-                        notifications.append(msg)
-        except Exception as e:
-            logging.error(f"❌ Ошибка трейлинг-стопа для {symbol}: {e}")
-            
-        return notifications
 
     async def close(self):
         await self.exchange.close()
