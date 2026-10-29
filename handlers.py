@@ -26,7 +26,7 @@ async def cmd_start(message: Message) -> None:
     pairs = ", ".join(config.SYMBOLS)
     await message.answer(
         f"Бот SMC-сигналов запущен.\n"
-        f"Пары: {pairs}, таймфрейм: {config.TIMEFRAME}.\n"
+        f"Пары: {pairs} ({len(config.SYMBOLS)} шт), таймфрейм: {config.TIMEFRAME}.\n"
         f"Команды: /status — состояние, /last — последний сигнал."
     )
 
@@ -35,7 +35,7 @@ async def cmd_start(message: Message) -> None:
 async def cmd_status(message: Message) -> None:
     pairs = ", ".join(config.SYMBOLS)
     await message.answer(
-        f"Пары: {pairs} ({config.TIMEFRAME})\n"
+        f"Пары: {pairs} ({len(config.SYMBOLS)} шт, {config.TIMEFRAME})\n"
         f"Последняя проверенная свеча (UTC): {state.last_candle}\n"
         f"Отправлено сигналов: {state.signals_sent}"
     )
