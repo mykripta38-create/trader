@@ -54,7 +54,7 @@ def analyze(
     swing_period: int = 5, 
     rr: float = 3.0, 
     tick: float = 0.01
-) -> list[Signal]:
+) -> list[dict]:
     if df.empty or df_htf.empty or len(df) < 2 or len(df_htf) < 200:
         return []
     if 'Close' not in df.columns or 'Close' not in df_htf.columns:
@@ -68,6 +68,7 @@ def analyze(
     v = df["Volume"].to_numpy(float)
     times = df.index
 
+    # 1. Тренд по старшему ТФ
     ema_fast = df_htf['Close'].ewm(span=50, adjust=False).mean().iloc[-1]
     ema_slow = df_htf['Close'].ewm(span=200, adjust=False).mean().iloc[-1]
     htf_close = df_htf['Close'].iloc[-1]
@@ -79,9 +80,7 @@ def analyze(
     else:
         htf_trend = "none"
 
-    if htf_trend == "none":
-        return []
-
+    # 2. ATR и объем
     atr_series = ta.atr(df['High'], df['Low'], df['Close'], length=14)
     avg_vol_series = df['Volume'].rolling(window=20).mean()
 
@@ -89,7 +88,7 @@ def analyze(
     last_sl: float | None = None
     trend = 0
     obs: list[OrderBlock] = []
-    signals: list[Signal] = []
+    results: list[dict] = []
 
     for t in range(len(df)):
         k = t - half
@@ -110,12 +109,11 @@ def analyze(
                     ob.active = False
                     continue
                 if trend == 1 and l[t] <= ob.top:
-                    if pd.isna(avg_vol_series.iloc[t]) or v[t] < avg_vol_series.iloc[t] * 1.5:
-                        continue
-
+                    vol_ok = not (pd.isna(avg_vol_series.iloc[t]) or v[t] < avg_vol_series.iloc[t] * 1.5)
+                    
                     entry = float(c[t])
                     atr_val = atr_series.iloc[t] if not pd.isna(atr_series.iloc[t]) else (entry * 0.002)
-                    sl = ob.bottom - (atr_val * 0.5) # УЗКИЙ СТОП
+                    sl = ob.bottom - (atr_val * 0.5)
                     
                     if entry > sl:
                         math_tp = entry + rr * (entry - sl)
@@ -123,24 +121,29 @@ def analyze(
                         tp = logical_tp if (logical_tp < math_tp and logical_tp > entry) else math_tp
                         
                         current_rr = (tp - entry) / (entry - sl)
-                        if current_rr < 3.0:  
-                            continue
-                            
-                        signals.append(Signal(ob.uid, "long", entry, sl, tp, rr,
-                                              ob.top, ob.bottom, ob.time, times[t],
-                                              math_tp=math_tp, logical_tp=logical_tp))
-                        ob.used = True
+                        rr_ok = current_rr >= 3.0
+                        
+                        reason = []
+                        if not vol_ok: reason.append(f"Объем ({v[t]/avg_vol_series.iloc[t]:.1f}x < 1.5x)")
+                        if not rr_ok: reason.append(f"R:R ({current_rr:.2f} < 3.0)")
+                        
+                        sig = Signal(ob.uid, "long", entry, sl, tp, rr,
+                                     ob.top, ob.bottom, ob.time, times[t],
+                                     math_tp=math_tp, logical_tp=logical_tp)
+                        results.append({"signal": sig, "is_valid": len(reason) == 0, "reason": ", ".join(reason)})
+                        
+                        if len(reason) == 0:
+                            ob.used = True
             else:
                 if c[t] > ob.top:
                     ob.active = False
                     continue
                 if trend == -1 and h[t] >= ob.bottom:
-                    if pd.isna(avg_vol_series.iloc[t]) or v[t] < avg_vol_series.iloc[t] * 1.5:
-                        continue
-
+                    vol_ok = not (pd.isna(avg_vol_series.iloc[t]) or v[t] < avg_vol_series.iloc[t] * 1.5)
+                    
                     entry = float(c[t])
                     atr_val = atr_series.iloc[t] if not pd.isna(atr_series.iloc[t]) else (entry * 0.002)
-                    sl = ob.top + (atr_val * 0.5) # УЗКИЙ СТОП
+                    sl = ob.top + (atr_val * 0.5)
                     
                     if entry < sl:
                         math_tp = entry - rr * (sl - entry)
@@ -148,25 +151,29 @@ def analyze(
                         tp = logical_tp if (logical_tp > math_tp and logical_tp < entry) else math_tp
                         
                         current_rr = (entry - tp) / (sl - entry)
-                        if current_rr < 3.0:  
-                            continue
-                            
-                        signals.append(Signal(ob.uid, "short", entry, sl, tp, rr,
-                                              ob.top, ob.bottom, ob.time, times[t],
-                                              math_tp=math_tp, logical_tp=logical_tp))
-                        ob.used = True
+                        rr_ok = current_rr >= 3.0
+                        
+                        reason = []
+                        if not vol_ok: reason.append(f"Объем ({v[t]/avg_vol_series.iloc[t]:.1f}x < 1.5x)")
+                        if not rr_ok: reason.append(f"R:R ({current_rr:.2f} < 3.0)")
+                        
+                        sig = Signal(ob.uid, "short", entry, sl, tp, rr,
+                                     ob.top, ob.bottom, ob.time, times[t],
+                                     math_tp=math_tp, logical_tp=logical_tp)
+                        results.append({"signal": sig, "is_valid": len(reason) == 0, "reason": ", ".join(reason)})
+                        
+                        if len(reason) == 0:
+                            ob.used = True
 
         if last_sh is not None and c[t] > last_sh:
             ob = _find_order_block(o, h, l, c, times, t, "long")
-            if ob:
-                obs.append(ob)
+            if ob: obs.append(ob)
             trend = 1
             last_sh = None
         elif last_sl is not None and c[t] < last_sl:
             ob = _find_order_block(o, h, l, c, times, t, "short")
-            if ob:
-                obs.append(ob)
+            if ob: obs.append(ob)
             trend = -1
             last_sl = None
 
-    return signals
+    return results
