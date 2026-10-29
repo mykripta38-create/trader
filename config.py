@@ -32,3 +32,5 @@ CHART_CANDLES: int = int(os.getenv("CHART_CANDLES", "70"))
 
 # Трейлинг отключен (высокий порог)
 TRAILING_TRIGGER_RR: float = float(os.getenv("TRAILING_TRIGGER_RR", "10.0"))
+# Риск-менеджмент
+RISK_PERCENT: float = float(os.getenv("RISK_PERCENT", "1.0"))  # 1% на сделку
