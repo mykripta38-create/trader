@@ -55,7 +55,6 @@ def analyze(
     rr: float = 3.0, 
     tick: float = 0.01
 ) -> list[Signal]:
-    # --- ЗАЩИТА ОТ ПУСТЫХ ДАННЫХ ---
     if df.empty or df_htf.empty or len(df) < 2 or len(df_htf) < 200:
         return []
     if 'Close' not in df.columns or 'Close' not in df_htf.columns:
@@ -69,7 +68,6 @@ def analyze(
     v = df["Volume"].to_numpy(float)
     times = df.index
 
-    # 1. Тренд по старшему ТФ (Двойной EMA 50 и 200)
     ema_fast = df_htf['Close'].ewm(span=50, adjust=False).mean().iloc[-1]
     ema_slow = df_htf['Close'].ewm(span=200, adjust=False).mean().iloc[-1]
     htf_close = df_htf['Close'].iloc[-1]
@@ -84,9 +82,7 @@ def analyze(
     if htf_trend == "none":
         return []
 
-    # 2. ATR для стопа
     atr_series = ta.atr(df['High'], df['Low'], df['Close'], length=14)
-    # 3. Средний объем
     avg_vol_series = df['Volume'].rolling(window=20).mean()
 
     last_sh: float | None = None
@@ -119,7 +115,7 @@ def analyze(
 
                     entry = float(c[t])
                     atr_val = atr_series.iloc[t] if not pd.isna(atr_series.iloc[t]) else (entry * 0.002)
-                    sl = ob.bottom - (atr_val * 0.5)
+                    sl = ob.bottom - (atr_val * 0.5) # УЗКИЙ СТОП
                     
                     if entry > sl:
                         math_tp = entry + rr * (entry - sl)
@@ -144,7 +140,7 @@ def analyze(
 
                     entry = float(c[t])
                     atr_val = atr_series.iloc[t] if not pd.isna(atr_series.iloc[t]) else (entry * 0.002)
-                    sl = ob.top + (atr_val * 0.5)
+                    sl = ob.top + (atr_val * 0.5) # УЗКИЙ СТОП
                     
                     if entry < sl:
                         math_tp = entry - rr * (sl - entry)

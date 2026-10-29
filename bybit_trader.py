@@ -53,7 +53,6 @@ class BybitTrader:
                     sl = float(pos['info'].get('stopLoss', 0))
                     tp = float(pos['info'].get('takeProfit', 0))
                     
-                    # Если уже в безубытке или не задан TP, пропускаем
                     if sl == 0 or tp == 0 or (pos['side'] == 'long' and sl >= entry) or (pos['side'] == 'short' and sl <= entry):
                         continue
                         
@@ -69,28 +68,19 @@ class BybitTrader:
                         
                     rr = profit / risk if risk > 0 else 0
                     
-                    # Если профит превысил 1:1.5, двигаем стоп в безубыток (entry)
                     if rr >= config.TRAILING_TRIGGER_RR:
                         new_sl = entry
-                        # Прямой вызов API Bybit V5 (работает во всех версиях ccxt)
-                        try:
-                            market_id = self.exchange.market(trade_symbol)['id']
-                            await self.exchange.privatePostV5PositionTradingStop({
-                                'category': 'linear',
-                                'symbol': market_id,
-                                'stopLoss': str(new_sl),
-                                'positionIdx': 0,
-                                'tpslMode': 'Full'
-                            })
-                            msg = (
-                                f"🛡️ <b>Трейлинг-стоп сработал!</b>\n"
-                                f"Пара: {trade_symbol}\n"
-                                f"Профит достиг 1:{rr:.2f}. Стоп передвинут в безубыток ({new_sl})."
-                            )
-                            logging.info(msg)
-                            notifications.append(msg)
-                        except Exception as e:
-                            logging.error(f"❌ Ошибка API при установке трейлинг-стопа: {e}")
+                        await self.exchange.set_trading_stop(
+                            symbol=trade_symbol,
+                            params={'stopLoss': new_sl, 'positionIdx': 0}
+                        )
+                        msg = (
+                            f"🛡️ <b>Трейлинг-стоп сработал!</b>\n"
+                            f"Пара: {trade_symbol}\n"
+                            f"Профит достиг 1:{rr:.2f}. Стоп передвинут в безубыток ({new_sl})."
+                        )
+                        logging.info(msg)
+                        notifications.append(msg)
         except Exception as e:
             logging.error(f"❌ Ошибка трейлинг-стопа для {symbol}: {e}")
             

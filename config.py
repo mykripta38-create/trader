@@ -18,7 +18,7 @@ BYBIT_API_SECRET: str = os.getenv("BYBIT_API_SECRET", "").strip()
 
 SYMBOLS: list[str] = [
     s.strip()
-    for s in os.getenv("SYMBOLS", "BTC/USDT").split(",")
+    for s in os.getenv("SYMBOLS", "GALA/USDT,SEI/USDT,AVAX/USDT,ENS/USDT").split(",")
     if s.strip()
 ]
 
@@ -30,5 +30,5 @@ RISK_REWARD: float = float(os.getenv("RISK_REWARD", "3.0"))
 TICK_SIZE: float = float(os.getenv("TICK_SIZE", "0.01"))
 CHART_CANDLES: int = int(os.getenv("CHART_CANDLES", "70"))
 
-# Настройки трейлинг-стопа
-TRAILING_TRIGGER_RR: float = float(os.getenv("TRAILING_TRIGGER_RR", "1.5"))
+# Трейлинг отключен (высокий порог)
+TRAILING_TRIGGER_RR: float = float(os.getenv("TRAILING_TRIGGER_RR", "10.0"))
