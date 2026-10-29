@@ -75,6 +75,7 @@ async def send_signal(bot: Bot, df, sig: Signal, symbol: str, trader: BybitTrade
 
 
 last_signal_time = {}
+last_debug_time = {}
 
 async def signal_loop(bot: Bot, data: BinanceData, symbol: str, trader: BybitTrader) -> None:
     sent = load_sent()
@@ -99,17 +100,39 @@ async def signal_loop(bot: Bot, data: BinanceData, symbol: str, trader: BybitTra
                     sigs_15m = await asyncio.to_thread(
                         analyze, df_15m, df_1h, config.SWING_PERIOD, config.RISK_REWARD, config.TICK_SIZE
                     )
-                    for s in sigs_15m:
-                        if s.direction == trend_15m:
-                            s.timeframe = "15m"
-                            all_signals.append((s, df_15m))
+                    for item in sigs_15m:
+                        if item["signal"].direction == trend_15m:
+                            item["signal"].timeframe = "15m"
+                            all_signals.append(item)
                 last_ts_15m = df_15m.index[-1]
 
-            for sig, df_source in all_signals:
+            for item in all_signals:
+                sig = item["signal"]
+                is_valid = item["is_valid"]
+                reason = item["reason"]
+                
                 key = f"{symbol}_{sig.timeframe}_{sig.uid}"
                 
                 fresh = (sig.time == df_15m.index[-1] if last_ts_15m else sig.time > (last_ts_15m or 0))
                 if not fresh or key in sent:
+                    continue
+
+                # Временной фильтр (Green Zone)
+                current_hour_utc = datetime.now(timezone.utc).hour
+                if current_hour_utc >= 14:
+                    # Отправляем почти-сигнал только раз в час
+                    debug_key = f"{symbol}_{sig.uid}_time"
+                    if current_time - last_debug_time.get(debug_key, 0) > 3600:
+                        text = (
+                            f"⚠️ <b>Почти-сигнал {sig.direction.upper()} {symbol}</b>\n"
+                            f"Вход: {format_price(sig.entry)}\n"
+                            f"Причина отказа: Red Zone (14:00-00:00 UTC)"
+                        )
+                        try:
+                            await bot.send_message(config.CHAT_ID, text, parse_mode=ParseMode.HTML)
+                            last_debug_time[debug_key] = current_time
+                        except Exception as e:
+                            logging.error(f"Ошибка отправки почти-сигнала: {e}")
                     continue
 
                 cooldown_key = f"{symbol}_{sig.timeframe}"
@@ -117,11 +140,25 @@ async def signal_loop(bot: Bot, data: BinanceData, symbol: str, trader: BybitTra
                 if current_time - last_time < 3600:
                     continue
 
-                await send_signal(bot, df_source, sig, symbol, trader)
-                
-                last_signal_time[cooldown_key] = current_time
-                sent.add(key)
-                save_sent(sent)
+                if is_valid:
+                    await send_signal(bot, df_15m, sig, symbol, trader)
+                    last_signal_time[cooldown_key] = current_time
+                    sent.add(key)
+                    save_sent(sent)
+                else:
+                    # Почти-сигнал (раз в час)
+                    debug_key = f"{symbol}_{sig.uid}_reason"
+                    if current_time - last_debug_time.get(debug_key, 0) > 3600:
+                        text = (
+                            f"⚠️ <b>Почти-сигнал {sig.direction.upper()} {symbol}</b>\n"
+                            f"Вход: {format_price(sig.entry)}\n"
+                            f"Причина отказа: {reason}"
+                        )
+                        try:
+                            await bot.send_message(config.CHAT_ID, text, parse_mode=ParseMode.HTML)
+                            last_debug_time[debug_key] = current_time
+                        except Exception as e:
+                            logging.error(f"Ошибка отправки почти-сигнала: {e}")
                 
             state.last_candle = f"{df_15m.index[-1]:%Y-%m-%d %H:%M}"
             
@@ -188,7 +225,7 @@ async def main() -> None:
 
         try:
             await bot.send_message(
-                config.CHAT_ID, f"Бот запущен (15m + R:R 1:3, 4 пары): {len(config.SYMBOLS)}"
+                config.CHAT_ID, f"Бот запущен (15m + Debug Mode): {len(config.SYMBOLS)} пар"
             )
         except Exception:
             logging.exception("Ошибка стартового сообщения")
