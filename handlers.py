@@ -12,7 +12,6 @@ router = Router()
 
 @dataclass
 class BotState:
-    """Общее состояние, которое обновляет главный цикл."""
     last_candle: str = "—"
     last_signal_text: str = ""
     signals_sent: int = 0
@@ -25,7 +24,7 @@ state = BotState()
 async def cmd_start(message: Message) -> None:
     pairs = ", ".join(config.SYMBOLS)
     await message.answer(
-        f"Бот SMC-сигналов запущен.\n"
+        f"Бот SMC-сигналов запущен (24/7).\n"
         f"Пары: {pairs} ({len(config.SYMBOLS)} шт), таймфрейм: {config.TIMEFRAME}.\n"
         f"Команды: /status — состояние, /last — последний сигнал."
     )
