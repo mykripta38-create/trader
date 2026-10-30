@@ -17,7 +17,6 @@ class BybitTrader:
         logging.info("Bybit Trader инициализирован в режиме Demo.")
 
     async def get_balance(self) -> float:
-        """Получает доступный баланс USDT."""
         try:
             balance = await self.exchange.fetch_balance({'type': 'swap'})
             if 'USDT' in balance['free']:
@@ -31,10 +30,9 @@ class BybitTrader:
         side = 'buy' if direction == 'long' else 'sell'
         trade_symbol = f"{symbol}:USDT" if ":" not in symbol else symbol
         
-        # --- РАСЧЕТ РАЗМЕРА ПОЗИЦИИ ОТ РИСКА ---
         balance = await self.get_balance()
         if balance <= 0:
-            logging.error("❌ Баланс равен 0 или не получен. Ордер не создан.")
+            logging.error("❌ Баланс равен 0 или не получен.")
             return None
 
         risk_amount = balance * (config.RISK_PERCENT / 100.0)
@@ -47,8 +45,7 @@ class BybitTrader:
         position_size_usdt = risk_amount / stop_distance_pct
         amount = position_size_usdt / entry
         
-        logging.info(f"📊 Риск: ${risk_amount:.2f} ({config.RISK_PERCENT}%), Позиция: ${position_size_usdt:.2f} ({amount:.4f} монет)")
-        # ---------------------------------------
+        logging.info(f"📊 Риск: ${risk_amount:.2f}, Позиция: ${position_size_usdt:.2f} ({amount:.4f} монет)")
 
         try:
             order = await self.exchange.create_order(
