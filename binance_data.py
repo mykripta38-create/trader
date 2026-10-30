@@ -1,4 +1,4 @@
-"""Получение свечей с Binance Futures через ccxt (асинхронно)."""
+"""Получение свечей с Binance Spot через ccxt (асинхронно)."""
 import ccxt.async_support as ccxt
 import pandas as pd
 import time
@@ -8,33 +8,24 @@ import config
 
 class BinanceData:
     def __init__(self) -> None:
-        self.exchange = ccxt.binance({
-            "enableRateLimit": True,
-            "options": {
-                "defaultType": "future",  # <-- Переключаемся на фьючерсы
-            },
-        })
+        # Возвращаемся на спотовый API (без defaultType: future)
+        self.exchange = ccxt.binance({"enableRateLimit": True})
 
     async def fetch_closed_candles(self, symbol: str, timeframe: str | None = None) -> pd.DataFrame:
-        """Возвращает DataFrame закрытых фьючерсных свечей."""
+        """Возвращает DataFrame закрытых спотовых свечей."""
         tf = timeframe or config.TIMEFRAME
         limit = config.CANDLES_LIMIT
 
-        # Для фьючерсов Binance использует формат 'BTC/USDT:USDT'
-        if ":" not in symbol:
-            future_symbol = f"{symbol}:USDT"
-        else:
-            future_symbol = symbol
-
+        # Для спота используем обычный формат 'BTC/USDT'
         tf_ms = self.exchange.parse_timeframe(tf) * 1000
         since = self.exchange.milliseconds() - (limit * tf_ms)
 
         raw = await self.exchange.fetch_ohlcv(
-            future_symbol, tf, since=since, limit=limit
+            symbol, tf, since=since, limit=limit
         )
 
         if not raw:
-            raise ValueError(f"Binance вернул пустой ответ для {future_symbol} {tf}")
+            raise ValueError(f"Binance вернул пустой ответ для {symbol} {tf}")
 
         df = pd.DataFrame(
             raw, columns=["ts", "Open", "High", "Low", "Close", "Volume"]
