@@ -30,6 +30,22 @@ class BybitTrader:
         side = 'buy' if direction == 'long' else 'sell'
         trade_symbol = f"{symbol}:USDT" if ":" not in symbol else symbol
         
+        # --- ЗАЩИТА ОТ ДУБЛИРУЮЩИХ ОРДЕРОВ ---
+        try:
+            positions = await self.exchange.fetch_positions([trade_symbol])
+            for pos in positions:
+                if float(pos['contracts']) > 0:
+                    logging.info(f"⏭️ Пропуск {symbol}: уже есть открытая позиция.")
+                    return None
+            
+            open_orders = await self.exchange.fetch_open_orders(trade_symbol)
+            if open_orders:
+                logging.info(f"⏭️ Пропуск {symbol}: уже есть активный ордер.")
+                return None
+        except Exception as e:
+            logging.error(f"Ошибка проверки позиций перед входом: {e}")
+        # -------------------------------------
+
         balance = await self.get_balance()
         if balance <= 0:
             logging.error("❌ Баланс равен 0 или не получен.")
