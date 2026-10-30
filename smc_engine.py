@@ -68,7 +68,6 @@ def analyze(
     v = df["Volume"].to_numpy(float)
     times = df.index
 
-    # 1. Тренд по старшему ТФ
     ema_fast = df_htf['Close'].ewm(span=50, adjust=False).mean().iloc[-1]
     ema_slow = df_htf['Close'].ewm(span=200, adjust=False).mean().iloc[-1]
     htf_close = df_htf['Close'].iloc[-1]
@@ -80,7 +79,6 @@ def analyze(
     else:
         htf_trend = "none"
 
-    # 2. ATR и объем
     atr_series = ta.atr(df['High'], df['Low'], df['Close'], length=14)
     avg_vol_series = df['Volume'].rolling(window=20).mean()
 
