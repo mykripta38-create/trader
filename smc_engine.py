@@ -111,11 +111,24 @@ def analyze(
                     
                     entry = float(c[t])
                     atr_val = atr_series.iloc[t] if not pd.isna(atr_series.iloc[t]) else (entry * 0.002)
-                    sl = ob.bottom - (atr_val * 0.5)
+                    
+                    # --- УЛУЧШЕННЫЙ СТОП-ЛОСС (За ликвидностью) ---
+                    sl_ob = ob.bottom
+                    if last_sl is not None and last_sl < entry:
+                        sl_base = min(sl_ob, last_sl) # Берем самый низкий уровень
+                    else:
+                        sl_base = sl_ob
+                    sl = sl_base - (atr_val * 0.5) # Буфер от прокола
                     
                     if entry > sl:
                         math_tp = entry + rr * (entry - sl)
-                        logical_tp = last_sh + (last_sh * 0.001) if last_sh else math_tp
+                        
+                        # --- УЛУЧШЕННЫЙ ТЕЙК-ПРОФИТ (До ликвидности) ---
+                        if last_sh is not None and last_sh > entry:
+                            logical_tp = last_sh - (last_sh * 0.001) # Чуть не доходя до свинга
+                        else:
+                            logical_tp = math_tp
+                            
                         tp = logical_tp if (logical_tp < math_tp and logical_tp > entry) else math_tp
                         
                         current_rr = (tp - entry) / (entry - sl)
@@ -141,11 +154,24 @@ def analyze(
                     
                     entry = float(c[t])
                     atr_val = atr_series.iloc[t] if not pd.isna(atr_series.iloc[t]) else (entry * 0.002)
-                    sl = ob.top + (atr_val * 0.5)
+                    
+                    # --- УЛУЧШЕННЫЙ СТОП-ЛОСС (За ликвидностью) ---
+                    sl_ob = ob.top
+                    if last_sh is not None and last_sh > entry:
+                        sl_base = max(sl_ob, last_sh) # Берем самый высокий уровень
+                    else:
+                        sl_base = sl_ob
+                    sl = sl_base + (atr_val * 0.5) # Буфер от прокола
                     
                     if entry < sl:
                         math_tp = entry - rr * (sl - entry)
-                        logical_tp = last_sl - (last_sl * 0.001) if last_sl else math_tp
+                        
+                        # --- УЛУЧШЕННЫЙ ТЕЙК-ПРОФИТ (До ликвидности) ---
+                        if last_sl is not None and last_sl < entry:
+                            logical_tp = last_sl + (last_sl * 0.001) # Чуть не доходя до свинга
+                        else:
+                            logical_tp = math_tp
+                            
                         tp = logical_tp if (logical_tp > math_tp and logical_tp < entry) else math_tp
                         
                         current_rr = (entry - tp) / (sl - entry)
