@@ -1,9 +1,8 @@
-"""Модуль автоматической торговли на Demo-счёте Bybit."""
+"""Модуль для автоматической торговли на Demo-счете Bybit."""
 import ccxt.async_support as ccxt
 import logging
 import config
 from datetime import datetime, timezone
-
 
 class BybitTrader:
     def __init__(self):
@@ -29,7 +28,7 @@ class BybitTrader:
             return 0.0
 
     # ============================================================
-    # 1. Создание сделки (без встроенных TP/SL)
+    # 1. Создание сделки (только лимитный ордер, без TP/SL)
     # ============================================================
     async def create_trade(self, symbol: str, direction: str, entry: float, sl: float, tp: float):
         side = 'buy' if direction == 'long' else 'sell'
@@ -76,8 +75,7 @@ class BybitTrader:
         logging.info(f"📊 Риск: ${risk_amount:.2f}, Позиция: ${position_size_usdt:.2f} ({amount:.4f} монет)")
 
         try:
-            # Создаём лимитный ордер, НЕ передаём stopLoss/takeProfit
-            # (CCXT unified create_order для Bybit V5 имеет подтверждённый баг [citation:1])
+            # Создаем лимитный ордер (БЕЗ stopLoss/takeProfit)
             order = await self.exchange.create_order(
                 symbol=trade_symbol,
                 type='limit',
@@ -86,15 +84,13 @@ class BybitTrader:
                 price=entry,
                 params={
                     'positionIdx': 0,
-                    # Намеренно не передаём stopLoss/takeProfit
                 }
             )
             logging.info(f"✅ Лимитный ордер создан: {trade_symbol} {side} {amount:.4f} @ {entry} (ID: {order['id']})")
 
-            # Сохраняем параметры для последующей установки TP/SL после исполнения
-            # Возвращаем ордер + метаданные, чтобы main.py мог отслеживать
+            # Возвращаем метаданные для фонового мониторинга
             return {
-                'order': order,
+                'order_id': order['id'],
                 'raw_symbol': raw_symbol,
                 'trade_symbol': trade_symbol,
                 'sl': sl,
@@ -106,13 +102,9 @@ class BybitTrader:
             return None
 
     # ============================================================
-    # 2. Установка TP/SL после подтверждения позиции
+    # 2. Установка TP/SL (вызывается после подтверждения позиции)
     # ============================================================
     async def set_position_stops(self, raw_symbol: str, sl: float, tp: float):
-        """
-        Устанавливает TP/SL для существующей позиции.
-        Должен вызываться ТОЛЬКО после того, как позиция точно существует.
-        """
         try:
             result = await self.exchange.private_post_v5_position_trading_stop({
                 'category': 'linear',
@@ -135,10 +127,9 @@ class BybitTrader:
             return False
 
     # ============================================================
-    # 3. Мониторинг старых лимитных ордеров (отмена > 3 часов)
+    # 3. Смотритель ордеров (отмена зависших лимиток > 3 часов)
     # ============================================================
     async def manage_orders(self, symbol: str, max_age_hours: int = 3):
-        """Отменяет лимитные ордера, которые висят слишком долго."""
         trade_symbol = f"{symbol}:USDT" if ":" not in symbol else symbol
         try:
             open_orders = await self.exchange.fetch_open_orders(trade_symbol)
@@ -151,22 +142,16 @@ class BybitTrader:
                 age_hours = (now - order_time) / 3600000.0
                 if age_hours > max_age_hours:
                     await self.exchange.cancel_order(order['id'], trade_symbol)
-                    logging.info(f"🧹 Отменён зависший ордер {trade_symbol} (возраст {age_hours:.1f} ч.)")
+                    logging.info(f"🧹 Отменен зависший ордер {trade_symbol} (возраст {age_hours:.1f} ч.)")
         except Exception as e:
             logging.error(f"Ошибка отмены ордеров для {symbol}: {e}")
 
     # ============================================================
-    # 4. Мониторинг зависших позиций (> 3 дней → уведомление)
+    # 4. Трекер зависших позиций (для уведомлений в ТГ)
     # ============================================================
     async def check_stale_positions(self, max_age_days: int = 3) -> list[dict]:
-        """
-        Проверяет все открытые позиции. Возвращает список позиций,
-        которые удерживаются дольше max_age_days.
-        main.py должен отправить уведомление в Telegram.
-        """
         stale = []
         try:
-            # Получаем все позиции (без фильтра по символу)
             positions = await self.exchange.fetch_positions()
             now_ms = self.exchange.milliseconds()
 
@@ -175,11 +160,8 @@ class BybitTrader:
                 if contracts <= 0:
                     continue
 
-                # Время открытия позиции
-                # В CCXT для Bybit поле 'timestamp' обычно содержит createdTime
                 open_time = pos.get('timestamp')
                 if not open_time:
-                    # Fallback: пробуем 'info' → 'createdTime'
                     info = pos.get('info', {})
                     open_time = int(info.get('createdTime', 0))
                     if open_time == 0:
