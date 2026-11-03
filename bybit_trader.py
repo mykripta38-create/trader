@@ -59,6 +59,14 @@ class BybitTrader:
             return None
             
         position_size_usdt = risk_amount / stop_distance_pct
+        
+        # --- ОГРАНИЧЕНИЕ МАКСИМАЛЬНОГО РАЗМЕРА ПОЗИЦИИ ---
+        MAX_POSITION_USDT = 20000  # Не более $20,000 на сделку
+        if position_size_usdt > MAX_POSITION_USDT:
+            position_size_usdt = MAX_POSITION_USDT
+            logging.warning(f"⚠️ Размер позиции {symbol} обрезан до {MAX_POSITION_USDT} USDT")
+        # ---------------------------------------------------
+
         amount = position_size_usdt / entry
         
         logging.info(f"📊 Риск: ${risk_amount:.2f}, Позиция: ${position_size_usdt:.2f} ({amount:.4f} монет)")
@@ -81,6 +89,24 @@ class BybitTrader:
         except Exception as e:
             logging.error(f"❌ Ошибка при создании ордера на Bybit: {e}")
             return None
+
+    # --- СМОТРИТЕЛЬ ЗАВИСШИХ ОРДЕРОВ ---
+    async def manage_orders(self, symbol: str, max_age_hours: int = 3):
+        """Отменяет лимитные ордера, которые висят слишком долго."""
+        trade_symbol = f"{symbol}:USDT" if ":" not in symbol else symbol
+        try:
+            open_orders = await self.exchange.fetch_open_orders(trade_symbol)
+            if not open_orders:
+                return
+            now = self.exchange.milliseconds()
+            for order in open_orders:
+                order_time = order.get('timestamp', now)
+                age_hours = (now - order_time) / 3600000.0
+                if age_hours > max_age_hours:
+                    await self.exchange.cancel_order(order['id'], trade_symbol)
+                    logging.info(f"🧹 Отменен зависший ордер {trade_symbol} (возраст {age_hours:.1f} ч.)")
+        except Exception as e:
+            logging.error(f"Ошибка отмены ордеров для {symbol}: {e}")
 
     async def close(self):
         await self.exchange.close()
