@@ -21,9 +21,9 @@ from smc_engine import Signal, analyze
 
 SENT_FILE = config.BASE_DIR / "sent_signals.json"
 
-# Глобальная переменная для Смотрителя ордеров
+# Глобальные переменные
 last_manage_time = 0
-
+pending_orders = []  # Очередь ордеров, ожидающих исполнения для установки TP/SL
 
 def load_sent() -> set[str]:
     try:
@@ -31,10 +31,8 @@ def load_sent() -> set[str]:
     except (FileNotFoundError, json.JSONDecodeError):
         return set()
 
-
 def save_sent(sent: set[str]) -> None:
-    SENT_FILE.write_text(json.dumps(sorted(sent)[-500:]), encoding="utf-8")
-
+    SENT_FILE.write_text(json.dumps(sorted(sent)[-5000:]), encoding="utf-8")
 
 def format_price(price: float) -> str:
     if price == 0: return "0"
@@ -42,7 +40,6 @@ def format_price(price: float) -> str:
     if price < 1: return f"{price:,.5f}"
     if price < 100: return f"{price:,.3f}"
     return f"{price:,.2f}"
-
 
 def format_signal(sig: Signal, symbol: str) -> str:
     is_long = sig.direction == "long"
@@ -64,7 +61,6 @@ def format_signal(sig: Signal, symbol: str) -> str:
         f"Свеча ретеста (UTC): {sig.time:%Y-%m-%d %H:%M}"
     )
 
-
 async def send_signal(bot: Bot, df, sig: Signal, symbol: str, trader: BybitTrader) -> None:
     text = format_signal(sig, symbol)
     
@@ -76,23 +72,23 @@ async def send_signal(bot: Bot, df, sig: Signal, symbol: str, trader: BybitTrade
         logging.error(f"❌ Ошибка при отправке ТЕКСТА: {e}")
 
     if config.BYBIT_API_KEY:
-        await trader.create_trade(symbol, sig.direction, sig.entry, sig.sl, sig.tp)
-
+        order_info = await trader.create_trade(symbol, sig.direction, sig.entry, sig.sl, sig.tp)
+        if order_info:
+            pending_orders.append(order_info)
+            logging.info(f"📥 Ордер добавлен в очередь мониторинга: {order_info['raw_symbol']}")
 
 last_signal_time = {}
 last_ts_map = {}
 
-
 async def process_symbol(bot: Bot, data: BinanceData, symbol: str, trader: BybitTrader) -> None:
-    """Обрабатывает одну пару (вызывается в пачечном цикле)."""
     global last_manage_time
     try:
-        # --- СМОТРИТЕЛЬ ОРДЕРОВ (раз в 15 минут) ---
+        # --- СМОТРИТЕЛЬ ОРДЕРОВ ---
         current_time = time.time()
-        if current_time - last_manage_time > 900: # 900 секунд = 15 минут
+        if current_time - last_manage_time > 900:
             await trader.manage_orders(symbol)
             last_manage_time = current_time
-        # -------------------------------------------
+        # ---------------------------
 
         df_15m = await data.fetch_closed_candles(symbol, timeframe="15m")
         df_1h = await data.fetch_closed_candles(symbol, timeframe="1h")
@@ -102,7 +98,7 @@ async def process_symbol(bot: Bot, data: BinanceData, symbol: str, trader: Bybit
         
         last_ts = last_ts_map.get(symbol)
         if last_ts is not None and df_15m.index[-1] <= last_ts:
-            return  # Нет новой свечи — пропускаем
+            return
         
         ema20 = df_15m['Close'].ewm(span=20, adjust=False).mean().iloc[-1]
         ema50 = df_15m['Close'].ewm(span=50, adjust=False).mean().iloc[-1]
@@ -123,11 +119,6 @@ async def process_symbol(bot: Bot, data: BinanceData, symbol: str, trader: Bybit
                 
                 if sig.direction != trend_15m:
                     continue
-                
-                # Временной фильтр (Green Zone) - ОТКЛЮЧЕН для сбора статистики
-                # current_hour_utc = datetime.now(timezone.utc).hour
-                # if current_hour_utc >= 14:
-                #     continue
                 
                 key = f"{symbol}_{sig.timeframe}_{sig.uid}"
                 fresh = (sig.time == df_15m.index[-1]) if last_ts is None else (sig.time > last_ts)
@@ -151,15 +142,12 @@ async def process_symbol(bot: Bot, data: BinanceData, symbol: str, trader: Bybit
     except Exception as e:
         logging.error(f"❌ Ошибка {symbol}: {e}")
 
-
 async def batched_loop(bot: Bot, data: BinanceData, trader: BybitTrader) -> None:
-    """Обрабатывает 50 пар циклическими пачками."""
     symbols = config.SYMBOLS
     batch_size = config.BATCH_SIZE
-    logging.info(f"Циклический цикл запущен (24/7): {len(symbols)} пар, батч {batch_size}")
+    logging.info(f"Циклический цикл запущен: {len(symbols)} пар, батч {batch_size}")
     
     current_index = 0
-    
     while True:
         try:
             batch = symbols[current_index : current_index + batch_size]
@@ -167,14 +155,11 @@ async def batched_loop(bot: Bot, data: BinanceData, trader: BybitTrader) -> None
                 current_index = 0
                 batch = symbols[current_index : current_index + batch_size]
             
-            logging.info(f"🔍 Проверка пачки ({len(batch)} пар): {', '.join(batch)}")
-            
             for symbol in batch:
                 await process_symbol(bot, data, symbol, trader)
             
             current_index = (current_index + batch_size) % len(symbols)
             gc.collect()
-            
             state.last_candle = f"{datetime.now(timezone.utc):%Y-%m-%d %H:%M}"
             
         except asyncio.CancelledError:
@@ -184,6 +169,54 @@ async def batched_loop(bot: Bot, data: BinanceData, trader: BybitTrader) -> None
         
         await asyncio.sleep(config.CHECK_INTERVAL)
 
+# --- НОВЫЕ ФОНОВЫЕ ЗАДАЧИ ---
+
+async def monitor_pending_orders(trader: BybitTrader):
+    """Проверяет исполнение лимиток и вешает на них TP/SL."""
+    logging.info("👁️ Монитор ордеров запущен (проверка каждые 30 сек).")
+    while True:
+        for item in pending_orders[:]:
+            try:
+                order_status = await trader.exchange.fetch_order(
+                    item['order_id'], item['trade_symbol']
+                )
+                status = order_status['status']
+                
+                if status == 'closed':  # Ордер исполнился, позиция открыта
+                    success = await trader.set_position_stops(
+                        item['raw_symbol'], item['sl'], item['tp']
+                    )
+                    if success:
+                        pending_orders.remove(item)
+                        logging.info(f"✅ Успешно закрыт вопрос по {item['raw_symbol']} (TP/SL стоят).")
+                    else:
+                        logging.warning(f"⏳ Не удалось установить TP/SL для {item['raw_symbol']}, повтор...")
+                
+                elif status == 'canceled':  # Ордер отменен (например, по таймауту)
+                    pending_orders.remove(item)
+                    logging.info(f"🗑️ Ордер {item['raw_symbol']} отменен, убран из мониторинга.")
+                    
+            except Exception as e:
+                logging.error(f"Ошибка мониторинга ордера {item.get('order_id')}: {e}")
+                
+        await asyncio.sleep(30)
+
+async def stale_position_reporter(bot: Bot, trader: BybitTrader):
+    """Раз в час проверяет, нет ли позиций старше 3 дней."""
+    while True:
+        await asyncio.sleep(3600)  # Раз в час
+        stale = await trader.check_stale_positions(max_age_days=3)
+        if stale:
+            lines = [f"⚠️ <b>Внимание: Зависшие позиции (>{3} дней)</b>"]
+            for s in stale:
+                lines.append(
+                    f"• {s['symbol']} {s['side']} | Объем: {s['contracts']} | "
+                    f"В рынке: {s['age_days']} дн. | PnL: {s['unrealized_pnl']} USDT"
+                )
+            try:
+                await bot.send_message(config.CHAT_ID, "\n".join(lines), parse_mode=ParseMode.HTML)
+            except Exception as e:
+                logging.error(f"Ошибка отправки отчета о зависших позициях: {e}")
 
 async def daily_report(bot: Bot):
     while True:
@@ -202,7 +235,6 @@ async def daily_report(bot: Bot):
         except Exception as e:
             logging.error(f"Ошибка отправки отчета: {e}")
 
-
 async def start_health_server():
     async def health_check(request):
         return web.Response(text="OK", status=200)
@@ -218,7 +250,6 @@ async def start_health_server():
     await site.start()
     logging.info(f"🌐 Keep-Alive сервер запущен на порту {port}")
 
-
 async def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     
@@ -230,8 +261,11 @@ async def main() -> None:
     data = BinanceData()
     trader = BybitTrader()
 
+    # Запуск фоновых задач
     task = asyncio.create_task(batched_loop(bot, data, trader))
     report_task = asyncio.create_task(daily_report(bot))
+    monitor_task = asyncio.create_task(monitor_pending_orders(trader))
+    stale_task = asyncio.create_task(stale_position_reporter(bot, trader))
 
     try:
         try:
@@ -241,20 +275,19 @@ async def main() -> None:
 
         try:
             await bot.send_message(
-                config.CHAT_ID, f"Бот запущен (50 пар, батч {config.BATCH_SIZE}): {len(config.SYMBOLS)} пар"
+                config.CHAT_ID, f"Бот запущен (50 пар, батч {config.BATCH_SIZE})"
             )
         except Exception:
             logging.exception("Ошибка стартового сообщения")
 
         await dp.start_polling(bot)
     finally:
-        for t in [task, report_task]:
+        for t in [task, report_task, monitor_task, stale_task]:
             t.cancel()
-        await asyncio.gather(task, report_task, return_exceptions=True)
+        await asyncio.gather(task, report_task, monitor_task, stale_task, return_exceptions=True)
         await data.close()
         await trader.close()
         await bot.session.close()
-
 
 if __name__ == "__main__":
     try:
