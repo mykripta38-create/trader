@@ -11,6 +11,7 @@ from aiohttp import web
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from aiogram.types import BufferedInputFile
 
 import config
 from binance_data import BinanceData
@@ -19,6 +20,9 @@ from handlers import router, state
 from smc_engine import Signal, analyze
 
 SENT_FILE = config.BASE_DIR / "sent_signals.json"
+
+# Глобальная переменная для Смотрителя ордеров
+last_manage_time = 0
 
 
 def load_sent() -> set[str]:
@@ -80,8 +84,16 @@ last_ts_map = {}
 
 
 async def process_symbol(bot: Bot, data: BinanceData, symbol: str, trader: BybitTrader) -> None:
-    """Обрабатывает одну пару."""
+    """Обрабатывает одну пару (вызывается в пачечном цикле)."""
+    global last_manage_time
     try:
+        # --- СМОТРИТЕЛЬ ОРДЕРОВ (раз в 15 минут) ---
+        current_time = time.time()
+        if current_time - last_manage_time > 900: # 900 секунд = 15 минут
+            await trader.manage_orders(symbol)
+            last_manage_time = current_time
+        # -------------------------------------------
+
         df_15m = await data.fetch_closed_candles(symbol, timeframe="15m")
         df_1h = await data.fetch_closed_candles(symbol, timeframe="1h")
         
@@ -112,12 +124,11 @@ async def process_symbol(bot: Bot, data: BinanceData, symbol: str, trader: Bybit
                 if sig.direction != trend_15m:
                     continue
                 
-                # --- ВРЕМЕННОЙ ФИЛЬТР ОТКЛЮЧЕН ДЛЯ СБОРА СТАТИСТИКИ ---
+                # Временной фильтр (Green Zone) - ОТКЛЮЧЕН для сбора статистики
                 # current_hour_utc = datetime.now(timezone.utc).hour
                 # if current_hour_utc >= 14:
                 #     continue
-                # -----------------------------------------------------
-
+                
                 key = f"{symbol}_{sig.timeframe}_{sig.uid}"
                 fresh = (sig.time == df_15m.index[-1]) if last_ts is None else (sig.time > last_ts)
                 
@@ -142,7 +153,7 @@ async def process_symbol(bot: Bot, data: BinanceData, symbol: str, trader: Bybit
 
 
 async def batched_loop(bot: Bot, data: BinanceData, trader: BybitTrader) -> None:
-    """Обрабатывает 50 пар циклическими пачками (24/7)."""
+    """Обрабатывает 50 пар циклическими пачками."""
     symbols = config.SYMBOLS
     batch_size = config.BATCH_SIZE
     logging.info(f"Циклический цикл запущен (24/7): {len(symbols)} пар, батч {batch_size}")
@@ -230,7 +241,7 @@ async def main() -> None:
 
         try:
             await bot.send_message(
-                config.CHAT_ID, f"Бот запущен (50 пар, 24/7): {len(config.SYMBOLS)} пар"
+                config.CHAT_ID, f"Бот запущен (50 пар, батч {config.BATCH_SIZE}): {len(config.SYMBOLS)} пар"
             )
         except Exception:
             logging.exception("Ошибка стартового сообщения")
