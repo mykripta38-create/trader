@@ -34,6 +34,24 @@ class BybitTrader:
             logging.error(f"❌ Ошибка получения баланса: {e}")
             return 0.0
 
+    async def has_active_position_or_order(self, symbol: str) -> bool:
+        """Проверяет, есть ли уже открытая позиция или лимитный ордер по паре."""
+        trade_symbol = f"{symbol}:USDT" if ":" not in symbol else symbol
+        try:
+            positions = await self.exchange.fetch_positions([trade_symbol])
+            for pos in positions:
+                if float(pos.get('contracts', 0)) > 0:
+                    return True
+            
+            open_orders = await self.exchange.fetch_open_orders(trade_symbol)
+            if open_orders:
+                return True
+                
+            return False
+        except Exception as e:
+            logging.error(f"Ошибка проверки позиции/ордера для {symbol}: {e}")
+            return False
+
     # ============================================================
     # 1. Создание сделки (только лимитный ордер, без TP/SL)
     # ============================================================
@@ -43,19 +61,9 @@ class BybitTrader:
         raw_symbol = symbol.replace('/', '')  # BTC/USDT -> BTCUSDT
 
         # --- Защита от дублирования ---
-        try:
-            positions = await self.exchange.fetch_positions([trade_symbol])
-            for pos in positions:
-                if float(pos['contracts']) > 0:
-                    logging.info(f"⏭️ Пропуск {symbol}: уже есть открытая позиция.")
-                    return None
-
-            open_orders = await self.exchange.fetch_open_orders(trade_symbol)
-            if open_orders:
-                logging.info(f"⏭️ Пропуск {symbol}: уже есть активный ордер.")
-                return None
-        except Exception as e:
-            logging.error(f"Ошибка проверки позиций перед входом: {e}")
+        if await self.has_active_position_or_order(symbol):
+            logging.info(f"⏭️ Пропуск {symbol}: уже есть открытая позиция или ордер.")
+            return None
         # -------------------------------------
 
         balance = await self.get_balance()
@@ -112,11 +120,7 @@ class BybitTrader:
     # 2. Установка TP/SL (с проверкой позиции и повторами)
     # ============================================================
     async def set_position_stops(self, raw_symbol: str, sl: float, tp: float):
-        """
-        Устанавливает TP/SL для существующей позиции с проверками и повторами.
-        raw_symbol: 'BNBUSDT' (без слеша и :USDT)
-        """
-        # 1. Убеждаемся, что позиция реально существует
+        """Устанавливает TP/SL для существующей позиции с проверками и повторами."""
         for attempt in range(1, 6):  # до 5 попыток
             try:
                 positions = await self.exchange.fetch_positions([raw_symbol + ':USDT'])
@@ -131,7 +135,7 @@ class BybitTrader:
                     await asyncio.sleep(3)
                     continue  # пробуем снова
 
-                # 2. Позиция есть — отправляем запрос на установку TP/SL
+                # Позиция есть — отправляем запрос (добавлены типы ордеров для Demo)
                 result = await self.exchange.private_post_v5_position_trading_stop({
                     'category': 'linear',
                     'symbol': raw_symbol,
@@ -141,6 +145,8 @@ class BybitTrader:
                     'takeProfit': str(tp),
                     'slTriggerBy': 'MarkPrice',
                     'tpTriggerBy': 'MarkPrice',
+                    'tpOrderType': 'Market',
+                    'slOrderType': 'Market',
                 })
 
                 if result.get('retCode') == 0:
@@ -148,7 +154,6 @@ class BybitTrader:
                     return True
                 else:
                     logging.error(f"❌ Bybit отклонил TP/SL для {raw_symbol}: retCode={result.get('retCode')}, retMsg={result.get('retMsg')}")
-                    # Если ошибка связана с задержкой инициализации позиции
                     if result.get('retCode') in (34000, 30000):
                         await asyncio.sleep(3)
                         continue
@@ -191,7 +196,6 @@ class BybitTrader:
             positions = await self.exchange.fetch_positions()
             now_sec = time.time()
             
-            # Загружаем локальную базу
             try:
                 tracker = json.loads(TRACKER_FILE.read_text(encoding="utf-8"))
             except (FileNotFoundError, json.JSONDecodeError):
@@ -208,16 +212,13 @@ class BybitTrader:
                 side = pos.get('side', 'unknown')
                 entry_price = pos.get('entryPrice', '0')
                 
-                # Уникальный ключ: Символ + Направление + Цена входа
                 key = f"{symbol}_{side}_{entry_price}"
                 active_keys.add(key)
                 
-                # Если бот видит позицию впервые — запоминаем время
                 if key not in tracker:
                     tracker[key] = now_sec
                     logging.info(f"👁️ Взята на контроль новая позиция: {key}")
                 
-                # Считаем возраст от момента, когда бот её впервые увидел
                 open_time = tracker[key]
                 age_days = (now_sec - open_time) / 86400.0
                 
@@ -231,13 +232,11 @@ class BybitTrader:
                         'unrealized_pnl': pos.get('unrealizedPnl'),
                     })
             
-            # Очищаем трекер от позиций, которые уже закрылись
             keys_to_remove = [k for k in tracker if k not in active_keys]
             for k in keys_to_remove:
                 del tracker[k]
                 logging.info(f"🧹 Позиция {k} закрыта, удалена из трекера возраста.")
             
-            # Сохраняем обновленный трекер
             TRACKER_FILE.write_text(json.dumps(tracker, indent=2), encoding="utf-8")
 
             if stale:
