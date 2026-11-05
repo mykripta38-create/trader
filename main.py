@@ -20,10 +20,11 @@ from handlers import router, state
 from smc_engine import Signal, analyze
 
 SENT_FILE = config.BASE_DIR / "sent_signals.json"
+PENDING_FILE = config.BASE_DIR / "pending_orders.json"
 
 # Глобальные переменные
 last_manage_time = 0
-pending_orders = []  # Очередь ордеров, ожидающих исполнения для установки TP/SL
+pending_orders = [] 
 
 def load_sent() -> set[str]:
     try:
@@ -33,6 +34,15 @@ def load_sent() -> set[str]:
 
 def save_sent(sent: set[str]) -> None:
     SENT_FILE.write_text(json.dumps(sorted(sent)[-5000:]), encoding="utf-8")
+
+def load_pending() -> list:
+    try:
+        return json.loads(PENDING_FILE.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        return []
+
+def save_pending(pending: list) -> None:
+    PENDING_FILE.write_text(json.dumps(pending), encoding="utf-8")
 
 def format_price(price: float) -> str:
     if price == 0: return "0"
@@ -75,6 +85,7 @@ async def send_signal(bot: Bot, df, sig: Signal, symbol: str, trader: BybitTrade
         order_info = await trader.create_trade(symbol, sig.direction, sig.entry, sig.sl, sig.tp)
         if order_info:
             pending_orders.append(order_info)
+            save_pending(pending_orders)  # СОХРАНЯЕМ В ФАЙЛ
             logging.info(f"📥 Ордер добавлен в очередь мониторинга: {order_info['raw_symbol']}")
 
 last_signal_time = {}
@@ -83,12 +94,10 @@ last_ts_map = {}
 async def process_symbol(bot: Bot, data: BinanceData, symbol: str, trader: BybitTrader) -> None:
     global last_manage_time
     try:
-        # --- СМОТРИТЕЛЬ ОРДЕРОВ ---
         current_time = time.time()
         if current_time - last_manage_time > 900:
             await trader.manage_orders(symbol)
             last_manage_time = current_time
-        # ---------------------------
 
         df_15m = await data.fetch_closed_candles(symbol, timeframe="15m")
         df_1h = await data.fetch_closed_candles(symbol, timeframe="1h")
@@ -132,6 +141,12 @@ async def process_symbol(bot: Bot, data: BinanceData, symbol: str, trader: Bybit
                     continue
                 
                 if is_valid:
+                    # Проверка перед отправкой (чтобы не спамить в ТГ)
+                    has_pos = await trader.has_active_position_or_order(symbol)
+                    if has_pos:
+                        logging.info(f"⏭️ Пропуск {symbol}: уже есть позиция/ордер. Сигнал в ТГ не отправлен.")
+                        continue
+                    
                     await send_signal(bot, df_15m, sig, symbol, trader)
                     last_signal_time[cooldown_key] = current_time
                     sent.add(key)
@@ -169,12 +184,12 @@ async def batched_loop(bot: Bot, data: BinanceData, trader: BybitTrader) -> None
         
         await asyncio.sleep(config.CHECK_INTERVAL)
 
-# --- НОВЫЕ ФОНОВЫЕ ЗАДАЧИ ---
-
-async def monitor_pending_orders(trader: BybitTrader):
-    """Проверяет исполнение лимиток и вешает на них TP/SL."""
+async def monitor_pending_orders(trader: BybitTrader, bot: Bot):
     logging.info("👁️ Монитор ордеров запущен (проверка каждые 30 сек).")
+    last_sanity_check = 0
+    
     while True:
+        # 1. Проверка очереди
         for item in pending_orders[:]:
             try:
                 order_status = await trader.exchange.fetch_order(
@@ -182,29 +197,55 @@ async def monitor_pending_orders(trader: BybitTrader):
                 )
                 status = order_status['status']
                 
-                if status == 'closed':  # Ордер исполнился, позиция открыта
+                if status == 'closed':
                     success = await trader.set_position_stops(
                         item['raw_symbol'], item['sl'], item['tp']
                     )
                     if success:
                         pending_orders.remove(item)
+                        save_pending(pending_orders) # Сохраняем
                         logging.info(f"✅ Успешно закрыт вопрос по {item['raw_symbol']} (TP/SL стоят).")
                     else:
                         logging.warning(f"⏳ Не удалось установить TP/SL для {item['raw_symbol']}, повтор...")
                 
-                elif status == 'canceled':  # Ордер отменен (например, по таймауту)
+                elif status == 'canceled':
                     pending_orders.remove(item)
+                    save_pending(pending_orders) # Сохраняем
                     logging.info(f"🗑️ Ордер {item['raw_symbol']} отменен, убран из мониторинга.")
                     
             except Exception as e:
                 logging.error(f"Ошибка мониторинга ордера {item.get('order_id')}: {e}")
+        
+        # 2. Sanity Check (раз в 10 минут)
+        current_time = time.time()
+        if current_time - last_sanity_check > 600:
+            last_sanity_check = current_time
+            try:
+                positions = await trader.exchange.fetch_positions()
+                for pos in positions:
+                    contracts = float(pos.get('contracts', 0) or 0)
+                    if contracts > 0:
+                        info = pos.get('info', {})
+                        sl = info.get('stopLoss', '')
+                        tp = info.get('takeProfit', '')
+                        
+                        if not sl or float(sl) == 0:
+                            raw_symbol = pos['symbol'].replace('/', '').split(':')[0]
+                            in_queue = any(o['raw_symbol'] == raw_symbol for o in pending_orders)
+                            
+                            if not in_queue:
+                                await bot.send_message(
+                                    config.CHAT_ID, 
+                                    f"🚨 <b>ВНИМАНИЕ! Позиция без стопов!</b>\n{raw_symbol} {pos['side']}\nБот не знает её параметры. Поставьте вручную!"
+                                )
+            except Exception as e:
+                logging.error(f"Ошибка Sanity Check: {e}")
                 
         await asyncio.sleep(30)
 
 async def stale_position_reporter(bot: Bot, trader: BybitTrader):
-    """Раз в час проверяет, нет ли позиций старше 3 дней."""
     while True:
-        await asyncio.sleep(3600)  # Раз в час
+        await asyncio.sleep(3600)
         stale = await trader.check_stale_positions(max_age_days=3)
         if stale:
             lines = [f"⚠️ <b>Внимание: Зависшие позиции (>{3} дней)</b>"]
@@ -261,10 +302,15 @@ async def main() -> None:
     data = BinanceData()
     trader = BybitTrader()
 
+    # Загружаем сохраненные ордера при старте
+    global pending_orders
+    pending_orders = load_pending()
+    logging.info(f"📦 Загружено {len(pending_orders)} ордеров из кэша мониторинга.")
+
     # Запуск фоновых задач
     task = asyncio.create_task(batched_loop(bot, data, trader))
     report_task = asyncio.create_task(daily_report(bot))
-    monitor_task = asyncio.create_task(monitor_pending_orders(trader))
+    monitor_task = asyncio.create_task(monitor_pending_orders(trader, bot))
     stale_task = asyncio.create_task(stale_position_reporter(bot, trader))
 
     try:
