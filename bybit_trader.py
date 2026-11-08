@@ -23,13 +23,14 @@ class BybitTrader:
             return 0.0
 
     async def create_trade(self, symbol: str, direction: str, entry: float, sl: float, tp: float):
+        """Создает лимитный ордер СРАЗУ со стопом и тейком."""
         side = 'buy' if direction == 'long' else 'sell'
         trade_symbol = f"{symbol}:USDT" if ":" not in symbol else symbol
 
-        # 1. Защита от дублей
+        # Защита от дублей (проверка, нет ли уже позиции или ордера)
         try:
             positions = await self.exchange.fetch_positions([trade_symbol])
-            if any(float(p.get('contracts', 0)) > 0 for p in positions):
+            if any(float(p['contracts']) > 0 for p in positions):
                 logging.info(f"⏭️ Пропуск {symbol}: уже есть открытая позиция.")
                 return None
             open_orders = await self.exchange.fetch_open_orders(trade_symbol)
@@ -39,44 +40,36 @@ class BybitTrader:
         except Exception as e:
             logging.error(f"Ошибка проверки перед входом: {e}")
 
-        # 2. Расчет размера позиции
         balance = await self.get_balance()
-        if balance <= 0:
-            return None
+        if balance <= 0: return None
 
         risk_amount = balance * (config.RISK_PERCENT / 100.0)
         stop_distance_pct = abs(entry - sl) / entry
-        if stop_distance_pct == 0:
-            return None
+        if stop_distance_pct == 0: return None
 
         position_size_usdt = min(risk_amount / stop_distance_pct, 20000)
         amount = position_size_usdt / entry
 
-        # Ограничение по лимиту контрактов (защита от ошибки 10001)
         try:
-            market = self.exchange.market(trade_symbol)
-            max_qty = market['limits']['amount']['max']
-            if max_qty and amount > max_qty:
-                logging.warning(f"⚠️ {symbol}: кол-во {amount:.2f} > лимита {max_qty}. Обрезано.")
-                amount = max_qty
-        except Exception:
-            pass
-
-        try:
-            # 3. Создаем ордер СРАЗУ со стопом и тейком (как было раньше)
+            # ВОТ ОНА, ИЗНАЧАЛЬНАЯ ЛОГИКА (с правильным синтаксисом Bybit V5)
             order = await self.exchange.create_order(
-                symbol=trade_symbol,
-                type='limit',
+                symbol=trade_symbol, 
+                type='limit', 
                 side=side,
-                amount=amount,
-                price=entry,
+                amount=amount, 
+                price=entry, 
                 params={
-                    'stopLoss': {'triggerPrice': sl},
-                    'takeProfit': {'triggerPrice': tp},
-                    'positionIdx': 0
+                    'positionIdx': 0,
+                    'stopLoss': str(sl),
+                    'takeProfit': str(tp),
+                    'tpslMode': 'Full',
+                    'tpOrderType': 'Market',
+                    'slOrderType': 'Market',
+                    'tpTriggerBy': 'MarkPrice',
+                    'slTriggerBy': 'MarkPrice'
                 }
             )
-            logging.info(f"✅ Лимитный ордер создан: {trade_symbol} {side} {amount:.4f} @ {entry}")
+            logging.info(f"✅ Ордер со стопами создан: {trade_symbol} {side} @ {entry}")
             return order
         except Exception as e:
             logging.error(f"❌ Ошибка создания ордера на Bybit: {e}")
@@ -93,8 +86,8 @@ class BybitTrader:
                 if age_hours > max_age_hours:
                     await self.exchange.cancel_order(order['id'], trade_symbol)
                     logging.info(f"🧹 Отменен зависший ордер {trade_symbol}")
-        except Exception:
-            pass
+        except Exception as e:
+            logging.error(f"Ошибка отмены для {symbol}: {e}")
 
     async def close(self):
         await self.exchange.close()
