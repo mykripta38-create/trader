@@ -11,7 +11,6 @@ from aiohttp import web
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.types import BufferedInputFile
 
 import config
 from binance_data import BinanceData
@@ -85,7 +84,7 @@ async def send_signal(bot: Bot, df, sig: Signal, symbol: str, trader: BybitTrade
         order_info = await trader.create_trade(symbol, sig.direction, sig.entry, sig.sl, sig.tp)
         if order_info:
             pending_orders.append(order_info)
-            save_pending(pending_orders)  # СОХРАНЯЕМ В ФАЙЛ
+            save_pending(pending_orders)
             logging.info(f"📥 Ордер добавлен в очередь мониторинга: {order_info['raw_symbol']}")
 
 last_signal_time = {}
@@ -141,7 +140,6 @@ async def process_symbol(bot: Bot, data: BinanceData, symbol: str, trader: Bybit
                     continue
                 
                 if is_valid:
-                    # Проверка перед отправкой (чтобы не спамить в ТГ)
                     has_pos = await trader.has_active_position_or_order(symbol)
                     if has_pos:
                         logging.info(f"⏭️ Пропуск {symbol}: уже есть позиция/ордер. Сигнал в ТГ не отправлен.")
@@ -170,6 +168,8 @@ async def batched_loop(bot: Bot, data: BinanceData, trader: BybitTrader) -> None
                 current_index = 0
                 batch = symbols[current_index : current_index + batch_size]
             
+            logging.info(f"🔍 Проверка пачки ({len(batch)} пар): {', '.join(batch)}")
+            
             for symbol in batch:
                 await process_symbol(bot, data, symbol, trader)
             
@@ -185,38 +185,43 @@ async def batched_loop(bot: Bot, data: BinanceData, trader: BybitTrader) -> None
         await asyncio.sleep(config.CHECK_INTERVAL)
 
 async def monitor_pending_orders(trader: BybitTrader, bot: Bot):
+    """Следит за лимитками и ставит стопы, когда они исполняются."""
     logging.info("👁️ Монитор ордеров запущен (проверка каждые 30 сек).")
     last_sanity_check = 0
     
     while True:
-        # 1. Проверка очереди
         for item in pending_orders[:]:
             try:
-                order_status = await trader.exchange.fetch_order(
-                    item['order_id'], item['trade_symbol']
-                )
-                status = order_status['status']
+                # 1. Проверяем, висит ли еще ордер (обходит лимит в 500 ордеров)
+                open_orders = await trader.exchange.fetch_open_orders(item['trade_symbol'])
+                is_still_open = any(o['id'] == item['order_id'] for o in open_orders)
                 
-                if status == 'closed':
-                    success = await trader.set_position_stops(
-                        item['raw_symbol'], item['sl'], item['tp']
-                    )
+                if is_still_open:
+                    continue  # Ордер еще висит, ждем
+                
+                # 2. Если ордера нет в открытых, проверяем, есть ли позиция
+                positions = await trader.exchange.fetch_positions([item['raw_symbol'] + ':USDT'])
+                has_position = any(float(p['contracts']) > 0 for p in positions)
+                
+                if has_position:
+                    # Позиция есть -> ордер исполнился, ставим стопы
+                    success = await trader.set_position_stops(item['raw_symbol'], item['sl'], item['tp'])
                     if success:
                         pending_orders.remove(item)
-                        save_pending(pending_orders) # Сохраняем
+                        save_pending(pending_orders)
                         logging.info(f"✅ Успешно закрыт вопрос по {item['raw_symbol']} (TP/SL стоят).")
                     else:
                         logging.warning(f"⏳ Не удалось установить TP/SL для {item['raw_symbol']}, повтор...")
-                
-                elif status == 'canceled':
+                else:
+                    # Позиции нет -> ордер отменен (например, по таймауту)
                     pending_orders.remove(item)
-                    save_pending(pending_orders) # Сохраняем
+                    save_pending(pending_orders)
                     logging.info(f"🗑️ Ордер {item['raw_symbol']} отменен, убран из мониторинга.")
                     
             except Exception as e:
                 logging.error(f"Ошибка мониторинга ордера {item.get('order_id')}: {e}")
         
-        # 2. Sanity Check (раз в 10 минут)
+        # Sanity Check: раз в 10 минут проверяем "голые" позиции
         current_time = time.time()
         if current_time - last_sanity_check > 600:
             last_sanity_check = current_time
