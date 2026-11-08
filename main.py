@@ -11,6 +11,7 @@ from aiohttp import web
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+import ccxt
 
 import config
 from binance_data import BinanceData
@@ -72,7 +73,7 @@ async def send_signal(bot: Bot, sig: Signal, symbol: str, trader: BybitTrader) -
         if order_info:
             pending_orders.append(order_info)
             save_pending(pending_orders)
-            logging.info(f"📥 Ордер добавлен в очередь мониторинга: {order_info['raw_symbol']}")
+            logging.info(f"📥 Ордер добавлен в очередь: {order_info['raw_symbol']}")
 
 last_signal_time = {}
 last_ts_map = {}
@@ -151,7 +152,6 @@ async def monitor_pending_orders(trader: BybitTrader, bot: Bot):
     last_sanity_check = 0
     
     while True:
-        # 1. Ставим стопы на новые исполненные ордера
         for item in pending_orders[:]:
             try:
                 open_orders = await trader.exchange.fetch_open_orders(item['trade_symbol'])
@@ -163,15 +163,18 @@ async def monitor_pending_orders(trader: BybitTrader, bot: Bot):
                     if await trader.set_position_stops(item['raw_symbol'], item['sl'], item['tp']):
                         pending_orders.remove(item)
                         save_pending(pending_orders)
-                        logging.info(f"✅ TP/SL установлены для {item['raw_symbol']}")
                 else:
                     pending_orders.remove(item)
                     save_pending(pending_orders)
-                    logging.info(f"🗑️ Ордер {item['raw_symbol']} отменен")
+                    
+            except ccxt.BadSymbol:
+                logging.warning(f"⚠️ Пара {item['raw_symbol']} не найдена в CCXT. Удалена из очереди.")
+                pending_orders.remove(item)
+                save_pending(pending_orders)
             except Exception as e:
                 logging.error(f"Ошибка мониторинга: {e}")
         
-        # 2. Sanity Check (раз в 10 минут)
+        # Sanity Check (раз в 10 минут)
         if time.time() - last_sanity_check > 600:
             last_sanity_check = time.time()
             try:
@@ -183,11 +186,11 @@ async def monitor_pending_orders(trader: BybitTrader, bot: Bot):
                             raw_symbol = pos['symbol'].replace('/', '').split(':')[0]
                             if not any(o['raw_symbol'] == raw_symbol for o in pending_orders):
                                 await bot.send_message(
-                                    config.CHAT_ID, 
-                                    f"🚨 <b>ВНИМАНИЕ! Позиция без стопов!</b>\n{raw_symbol} {pos['side']}\nПоставьте вручную!"
+                                    config.CHAT_ID,
+                                    f"🚨 <b>Позиция без стопов!</b> {raw_symbol} {pos['side']}\nПоставьте вручную!"
                                 )
-            except Exception as e:
-                logging.error(f"Ошибка Sanity Check: {e}")
+            except Exception:
+                pass
                 
         await asyncio.sleep(30)
 
@@ -218,6 +221,9 @@ async def main() -> None:
     dp.include_router(router)
     data = BinanceData()
     trader = BybitTrader()
+
+    # Принудительно обновляем рынки перед стартом
+    await trader.load_markets()
 
     global pending_orders
     pending_orders = load_pending()
