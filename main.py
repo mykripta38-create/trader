@@ -40,12 +40,11 @@ def format_signal(sig: Signal, symbol: str) -> str:
     risk_pct = abs(sig.entry - sig.sl) / sig.entry * 100
     actual_rr = (sig.tp - sig.entry) / (sig.entry - sig.sl) if is_long else (sig.entry - sig.tp) / (sig.sl - sig.entry)
     return (
-        f"{'🟢' if is_long else '🔴'} <b>{'LONG' if is_long else 'SHORT'} {symbol}</b> ({sig.timeframe})\n\n"
+        f"{'🟢' if is_long else '🔴'} <b>{'LONG' if is_long else 'SHORT'} {symbol}</b>\n\n"
         f"Вход: <b>{format_price(sig.entry)}</b>\n"
         f"Stop-Loss: <b>{format_price(sig.sl)}</b>\n"
         f"Take-Profit: <b>{format_price(sig.tp)}</b>\n"
-        f"R:R = 1:{actual_rr:.2f} | риск {risk_pct:.2f}%\n\n"
-        f"Свеча ретеста (UTC): {sig.time:%Y-%m-%d %H:%M}"
+        f"R:R = 1:{actual_rr:.2f} | риск {risk_pct:.2f}%"
     )
 
 async def send_signal(bot: Bot, sig: Signal, symbol: str, trader: BybitTrader) -> None:
@@ -135,8 +134,7 @@ async def daily_report(bot: Bot):
         await asyncio.sleep(sec)
         try:
             await bot.send_message(config.CHAT_ID, f"📊 <b>Отчет</b>\nСигналов: {state.signals_sent}\nСвеча: {state.last_candle}")
-        except: 
-            pass
+        except: pass
 
 async def start_health_server():
     app = web.Application()
@@ -162,7 +160,7 @@ async def main() -> None:
 
     try:
         await bot.delete_webhook(drop_pending_updates=True)
-        await bot.send_message(config.CHAT_ID, f"Бот запущен (пар: {len(config.SYMBOLS)})")
+        await bot.send_message(config.CHAT_ID, "Бот запущен (ордера со стопами).")
         await dp.start_polling(bot)
     finally:
         for t in [task, report_task]: t.cancel()
@@ -172,7 +170,5 @@ async def main() -> None:
         await bot.session.close()
 
 if __name__ == "__main__":
-    try: 
-        asyncio.run(main())
-    except KeyboardInterrupt: 
-        pass
+    try: asyncio.run(main())
+    except KeyboardInterrupt: pass
