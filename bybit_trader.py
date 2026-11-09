@@ -51,7 +51,16 @@ class BybitTrader:
         amount = position_size_usdt / entry
 
         try:
-            # ВОТ ОНА, ИЗНАЧАЛЬНАЯ ЛОГИКА (с правильным синтаксисом Bybit V5)
+            # --- 1. ОКРУГЛЕНИЕ ЦЕН ДО ШАГА БИРЖИ (КРИТИЧНО ДЛЯ ДЕШЕВЫХ МОНЕТ) ---
+            try:
+                sl = float(self.exchange.price_to_precision(trade_symbol, sl))
+                tp = float(self.exchange.price_to_precision(trade_symbol, tp))
+                entry = float(self.exchange.price_to_precision(trade_symbol, entry))
+            except Exception as e:
+                logging.warning(f"⚠️ Не удалось округлить цены для {symbol}: {e}")
+            # ---------------------------------------------------------------------
+
+            # --- 2. СОЗДАНИЕ ОРДЕРА СРАЗУ С TP/SL ---
             order = await self.exchange.create_order(
                 symbol=trade_symbol, 
                 type='limit', 
@@ -69,7 +78,14 @@ class BybitTrader:
                     'slTriggerBy': 'MarkPrice'
                 }
             )
-            logging.info(f"✅ Ордер со стопами создан: {trade_symbol} {side} @ {entry}")
+            
+            # --- 3. ПРОВЕРКА: ПРИНЯЛА ЛИ БИРЖА СТОПЫ? ---
+            order_info = order.get('info', {})
+            if not order_info.get('stopLoss') and not order_info.get('takeProfit'):
+                logging.warning(f"⚠️ ВНИМАНИЕ! Bybit создал ордер {symbol}, но ПРОИГНОРИРОВАЛ стопы! (возможно, проблема с точностью цен или Demo-счет глючит)")
+            else:
+                logging.info(f"✅ Ордер со стопами создан: {trade_symbol} {side} @ {entry} (SL={sl}, TP={tp})")
+            
             return order
         except Exception as e:
             logging.error(f"❌ Ошибка создания ордера на Bybit: {e}")
