@@ -11,20 +11,12 @@ from aiohttp import web
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.types import BufferedInputFile
 
 import config
 from binance_data import BinanceData
 from bybit_trader import BybitTrader
 from handlers import router, state
 from smc_engine import Signal, analyze
-
-try:
-    from chart import render_chart
-    HAS_CHARTS = True
-except ImportError:
-    HAS_CHARTS = False
-    logging.warning("⚠️ Модуль chart.py не найден. Графики отключены.")
 
 SENT_FILE = config.BASE_DIR / "sent_signals.json"
 last_manage_time = 0
@@ -66,19 +58,6 @@ async def send_signal(bot: Bot, df, sig: Signal, symbol: str, trader: BybitTrade
         state.signals_sent += 1
     except Exception as e:
         logging.error(f"❌ Ошибка при отправке ТЕКСТА: {e}")
-
-    # График (если включен и файл на месте)
-    if HAS_CHARTS and config.ENABLE_CHARTS:
-        try:
-            chart_bytes = await render_chart(df, sig, symbol)
-            photo = BufferedInputFile(chart_bytes, filename=f"{symbol}_chart.png")
-            await bot.send_photo(
-                chat_id=config.CHAT_ID, 
-                photo=photo, 
-                caption=f"📊 Логика SMC для {symbol} ({sig.direction.upper()})"
-            )
-        except Exception as e:
-            logging.error(f"❌ Ошибка отправки графика: {e}")
 
     if config.BYBIT_API_KEY:
         await trader.create_trade(symbol, sig.direction, sig.entry, sig.sl, sig.tp)
@@ -187,7 +166,8 @@ async def main() -> None:
 
     try:
         await bot.delete_webhook(drop_pending_updates=True)
-        await bot.send_message(config.CHAT_ID, "Бот запущен (с графиками и гарантией TP/SL).")
+        # Убрали отправку сообщения при старте, чтобы не спамить при перезапусках
+        logging.info("🚀 Бот успешно запущен и готов к работе.")
         await dp.start_polling(bot)
     finally:
         for t in [task, report_task]: t.cancel()
