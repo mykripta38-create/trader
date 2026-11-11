@@ -19,7 +19,6 @@ from bybit_trader import BybitTrader
 from handlers import router, state
 from smc_engine import Signal, analyze
 
-# Импортируем функцию отрисовки графика (если файл chart.py на месте)
 try:
     from chart import render_chart
     HAS_CHARTS = True
@@ -68,8 +67,8 @@ async def send_signal(bot: Bot, df, sig: Signal, symbol: str, trader: BybitTrade
     except Exception as e:
         logging.error(f"❌ Ошибка при отправке ТЕКСТА: {e}")
 
-    # Отправка графика (если включен)
-    if HAS_CHARTS:
+    # График (если включен и файл на месте)
+    if HAS_CHARTS and config.ENABLE_CHARTS:
         try:
             chart_bytes = await render_chart(df, sig, symbol)
             photo = BufferedInputFile(chart_bytes, filename=f"{symbol}_chart.png")
@@ -180,7 +179,7 @@ async def main() -> None:
     data = BinanceData()
     trader = BybitTrader()
 
-    # --- ЗАПУСКАЕМ ФОНОВЫЙ МОНИТОР TP/SL ---
+    # Запуск фонового монитора TP/SL
     await trader.start_monitor()
 
     task = asyncio.create_task(batched_loop(bot, data, trader))
@@ -188,7 +187,7 @@ async def main() -> None:
 
     try:
         await bot.delete_webhook(drop_pending_updates=True)
-        await bot.send_message(config.CHAT_ID, "Бот запущен (с гарантией TP/SL и графиками).")
+        await bot.send_message(config.CHAT_ID, "Бот запущен (с графиками и гарантией TP/SL).")
         await dp.start_polling(bot)
     finally:
         for t in [task, report_task]: t.cancel()
