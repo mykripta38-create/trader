@@ -11,12 +11,21 @@ from aiohttp import web
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from aiogram.types import BufferedInputFile
 
 import config
 from binance_data import BinanceData
 from bybit_trader import BybitTrader
 from handlers import router, state
 from smc_engine import Signal, analyze
+
+# Импортируем функцию отрисовки графика (если файл chart.py на месте)
+try:
+    from chart import render_chart
+    HAS_CHARTS = True
+except ImportError:
+    HAS_CHARTS = False
+    logging.warning("⚠️ Модуль chart.py не найден. Графики отключены.")
 
 SENT_FILE = config.BASE_DIR / "sent_signals.json"
 last_manage_time = 0
@@ -40,21 +49,37 @@ def format_signal(sig: Signal, symbol: str) -> str:
     risk_pct = abs(sig.entry - sig.sl) / sig.entry * 100
     actual_rr = (sig.tp - sig.entry) / (sig.entry - sig.sl) if is_long else (sig.entry - sig.tp) / (sig.sl - sig.entry)
     return (
-        f"{'🟢' if is_long else '🔴'} <b>{'LONG' if is_long else 'SHORT'} {symbol}</b>\n\n"
+        f"{'🟢' if is_long else '🔴'} <b>{'LONG' if is_long else 'SHORT'} {symbol}</b> ({sig.timeframe})\n\n"
         f"Вход: <b>{format_price(sig.entry)}</b>\n"
         f"Stop-Loss: <b>{format_price(sig.sl)}</b>\n"
         f"Take-Profit: <b>{format_price(sig.tp)}</b>\n"
-        f"R:R = 1:{actual_rr:.2f} | риск {risk_pct:.2f}%"
+        f"R:R = 1:{actual_rr:.2f} | риск {risk_pct:.2f}%\n\n"
+        f"Order Block: {format_price(sig.ob_bottom)} – {format_price(sig.ob_top)}\n"
+        f"Свеча ретеста (UTC): {sig.time:%Y-%m-%d %H:%M}"
     )
 
-async def send_signal(bot: Bot, sig: Signal, symbol: str, trader: BybitTrader) -> None:
+async def send_signal(bot: Bot, df, sig: Signal, symbol: str, trader: BybitTrader) -> None:
     text = format_signal(sig, symbol)
+    
     try:
         await bot.send_message(config.CHAT_ID, text, parse_mode=ParseMode.HTML)
         state.last_signal_text = text
         state.signals_sent += 1
     except Exception as e:
-        logging.error(f"❌ Ошибка ТГ: {e}")
+        logging.error(f"❌ Ошибка при отправке ТЕКСТА: {e}")
+
+    # Отправка графика (если включен)
+    if HAS_CHARTS:
+        try:
+            chart_bytes = await render_chart(df, sig, symbol)
+            photo = BufferedInputFile(chart_bytes, filename=f"{symbol}_chart.png")
+            await bot.send_photo(
+                chat_id=config.CHAT_ID, 
+                photo=photo, 
+                caption=f"📊 Логика SMC для {symbol} ({sig.direction.upper()})"
+            )
+        except Exception as e:
+            logging.error(f"❌ Ошибка отправки графика: {e}")
 
     if config.BYBIT_API_KEY:
         await trader.create_trade(symbol, sig.direction, sig.entry, sig.sl, sig.tp)
@@ -96,7 +121,7 @@ async def process_symbol(bot: Bot, data: BinanceData, symbol: str, trader: Bybit
                 cooldown_key = f"{symbol}_{sig.timeframe}"
                 if time.time() - last_signal_time.get(cooldown_key, 0) < 3600: continue
                 
-                await send_signal(bot, sig, symbol, trader)
+                await send_signal(bot, df_15m, sig, symbol, trader)
                 last_signal_time[cooldown_key] = time.time()
                 sent.add(key)
                 save_sent(sent)
@@ -155,12 +180,15 @@ async def main() -> None:
     data = BinanceData()
     trader = BybitTrader()
 
+    # --- ЗАПУСКАЕМ ФОНОВЫЙ МОНИТОР TP/SL ---
+    await trader.start_monitor()
+
     task = asyncio.create_task(batched_loop(bot, data, trader))
     report_task = asyncio.create_task(daily_report(bot))
 
     try:
         await bot.delete_webhook(drop_pending_updates=True)
-        await bot.send_message(config.CHAT_ID, "Бот запущен (ордера со стопами).")
+        await bot.send_message(config.CHAT_ID, "Бот запущен (с гарантией TP/SL и графиками).")
         await dp.start_polling(bot)
     finally:
         for t in [task, report_task]: t.cancel()
