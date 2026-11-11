@@ -1,8 +1,12 @@
-"""Модуль для автоматической торговли на Demo-счете Bybit с гарантированной установкой TP/SL."""
+"""Модуль для автоматической торговли на Demo-счете Bybit с гарантией TP/SL."""
 import ccxt.async_support as ccxt
 import logging
 import asyncio
+import json
 import config
+from pathlib import Path
+
+PENDING_FILE = config.BASE_DIR / "pending_stops.json"
 
 class BybitTrader:
     def __init__(self):
@@ -13,64 +17,74 @@ class BybitTrader:
             'options': {'defaultType': 'swap'}
         })
         self.exchange.enableDemoTrading(True)
-        self._pending_checks = []  # список (raw_symbol, sl, tp) для фоновой проверки
+        self._pending_checks = self._load_pending()
         self._monitor_task = None
-        logging.info("Bybit Trader инициализирован (с гарантией TP/SL).")
+        logging.info(f"Bybit Trader инициализирован. В очереди на проверку TP/SL: {len(self._pending_checks)}")
+
+    def _load_pending(self) -> list:
+        try:
+            return json.loads(PENDING_FILE.read_text(encoding="utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError):
+            return []
+
+    def _save_pending(self):
+        PENDING_FILE.write_text(json.dumps(self._pending_checks), encoding="utf-8")
 
     async def start_monitor(self):
-        """Запускает фоновую задачу, которая проверяет исполненные ордера и доставляет TP/SL."""
         if self._monitor_task is None or self._monitor_task.done():
             self._monitor_task = asyncio.create_task(self._monitor_loop())
             logging.info("👁️ Фоновый монитор TP/SL запущен.")
 
     async def _monitor_loop(self):
         while True:
+            # 1. Проверяем очередь из памяти (и из файла)
             for item in self._pending_checks[:]:
                 raw_symbol, sl, tp = item
                 try:
-                    # Проверяем, есть ли открытая позиция по символу
                     positions = await self.exchange.fetch_positions([raw_symbol + ':USDT'])
-                    active = None
-                    for pos in positions:
-                        if float(pos.get('contracts', 0)) > 0:
-                            active = pos
-                            break
+                    active = next((p for p in positions if float(p.get('contracts', 0)) > 0), None)
                     
                     if active:
-                        # Позиция есть — проверяем, установлены ли TP/SL
+                        # Позиция открыта. Есть ли стопы?
                         stop_loss = active.get('info', {}).get('stopLoss', '')
                         take_profit = active.get('info', {}).get('takeProfit', '')
                         
                         if not stop_loss or float(stop_loss) == 0 or not take_profit or float(take_profit) == 0:
                             logging.warning(f"⚠️ Позиция {raw_symbol} без TP/SL. Принудительная установка...")
-                            await self.set_position_stops(raw_symbol, sl, tp)
-                        
-                        self._pending_checks.remove(item)
+                            success = await self.set_position_stops(raw_symbol, sl, tp)
+                            if success:
+                                self._pending_checks.remove(item)
+                                self._save_pending()
+                        else:
+                            # Стопы уже стоят (Bybit сам перенес их с ордера)
+                            self._pending_checks.remove(item)
+                            self._save_pending()
+                    else:
+                        # Позиции нет. Проверяем, висит ли еще ордер?
+                        open_orders = await self.exchange.fetch_open_orders(raw_symbol + ':USDT')
+                        if not any(o['id'] == item.get('order_id') for o in open_orders):
+                            # Ни ордера, ни позиции — значит, отменился
+                            self._pending_checks.remove(item)
+                            self._save_pending()
                 except Exception as e:
                     logging.error(f"Ошибка в мониторе TP/SL для {raw_symbol}: {e}")
             
-            await asyncio.sleep(30)  # проверка каждые 30 секунд
+            await asyncio.sleep(30)
 
     async def set_position_stops(self, raw_symbol: str, sl: float, tp: float):
-        """Принудительно устанавливает TP/SL для существующей позиции."""
         try:
             result = await self.exchange.private_post_v5_position_trading_stop({
-                'category': 'linear',
-                'symbol': raw_symbol,
-                'tpslMode': 'Full',
-                'positionIdx': 0,
-                'stopLoss': str(sl),
-                'takeProfit': str(tp),
-                'slTriggerBy': 'MarkPrice',
-                'tpTriggerBy': 'MarkPrice',
-                'tpOrderType': 'Market',
-                'slOrderType': 'Market'
+                'category': 'linear', 'symbol': raw_symbol,
+                'tpslMode': 'Full', 'positionIdx': 0,
+                'stopLoss': str(sl), 'takeProfit': str(tp),
+                'slTriggerBy': 'MarkPrice', 'tpTriggerBy': 'MarkPrice',
+                'tpOrderType': 'Market', 'slOrderType': 'Market'
             })
             if result.get('retCode') == 0:
-                logging.info(f"✅ TP/SL принудительно установлены для {raw_symbol}: SL={sl}, TP={tp}")
+                logging.info(f"✅ TP/SL установлены для {raw_symbol}: SL={sl}, TP={tp}")
                 return True
             else:
-                logging.error(f"❌ Bybit отклонил TP/SL для {raw_symbol}: {result.get('retMsg')}")
+                logging.error(f"❌ Bybit отклонил: {result.get('retMsg')}")
                 return False
         except Exception as e:
             logging.error(f"❌ Ошибка установки TP/SL для {raw_symbol}: {e}")
@@ -81,80 +95,60 @@ class BybitTrader:
             balance = await self.exchange.fetch_balance({'type': 'swap'})
             return float(balance['free'].get('USDT', 0.0))
         except Exception as e:
-            logging.error(f"❌ Ошибка получения баланса: {e}")
             return 0.0
 
     async def create_trade(self, symbol: str, direction: str, entry: float, sl: float, tp: float):
-        """Создаёт лимитный ордер с TP/SL и добавляет его в фоновую проверку."""
         side = 'buy' if direction == 'long' else 'sell'
         trade_symbol = f"{symbol}:USDT" if ":" not in symbol else symbol
         raw_symbol = symbol.replace('/', '')
 
-        # Защита от дублей
         try:
             positions = await self.exchange.fetch_positions([trade_symbol])
-            if any(float(p['contracts']) > 0 for p in positions):
-                logging.info(f"⏭️ Пропуск {symbol}: уже есть открытая позиция.")
-                return None
+            if any(float(p['contracts']) > 0 for p in positions): return None
             open_orders = await self.exchange.fetch_open_orders(trade_symbol)
-            if open_orders:
-                logging.info(f"⏭️ Пропуск {symbol}: уже есть активный ордер.")
-                return None
+            if open_orders: return None
         except Exception as e:
-            logging.error(f"Ошибка проверки перед входом: {e}")
+            logging.error(f"Ошибка проверки: {e}")
 
         balance = await self.get_balance()
-        if balance <= 0:
-            return None
+        if balance <= 0: return None
 
         risk_amount = balance * (config.RISK_PERCENT / 100.0)
         stop_distance_pct = abs(entry - sl) / entry
-        if stop_distance_pct == 0:
-            return None
+        if stop_distance_pct == 0: return None
 
         position_size_usdt = min(risk_amount / stop_distance_pct, 20000)
         amount = position_size_usdt / entry
 
-        # Округление цен до шага биржи (критично для дешёвых монет)
         try:
             entry = float(self.exchange.price_to_precision(trade_symbol, entry))
             sl = float(self.exchange.price_to_precision(trade_symbol, sl))
             tp = float(self.exchange.price_to_precision(trade_symbol, tp))
-        except Exception as e:
-            logging.warning(f"Не удалось округлить цены для {symbol}: {e}")
+        except: pass
 
         try:
-            # Создаём лимитный ордер с TP/SL
             order = await self.exchange.create_order(
-                symbol=trade_symbol,
-                type='limit',
-                side=side,
-                amount=amount,
-                price=entry,
+                symbol=trade_symbol, type='limit', side=side, amount=amount, price=entry,
                 params={
                     'positionIdx': 0,
-                    'stopLoss': str(sl),
-                    'takeProfit': str(tp),
-                    'tpslMode': 'Full',
-                    'tpOrderType': 'Market',
-                    'slOrderType': 'Market',
-                    'tpTriggerBy': 'MarkPrice',
-                    'slTriggerBy': 'MarkPrice'
+                    'stopLoss': str(sl), 'takeProfit': str(tp),
+                    'tpslMode': 'Full', 'tpOrderType': 'Market', 'slOrderType': 'Market',
+                    'tpTriggerBy': 'MarkPrice', 'slTriggerBy': 'MarkPrice'
                 }
             )
-            logging.info(f"✅ Лимитный ордер создан: {trade_symbol} {side} @ {entry} (с TP/SL)")
-
-            # Добавляем в очередь на проверку
-            self._pending_checks.append((raw_symbol, sl, tp))
+            logging.info(f"✅ Ордер создан: {trade_symbol} @ {entry} (с TP/SL)")
+            
+            # ДОБАВЛЯЕМ В ФАЙЛ
+            self._pending_checks.append([raw_symbol, sl, tp])
+            self._save_pending()
             await self.start_monitor()
 
             return order
         except Exception as e:
-            logging.error(f"❌ Ошибка создания ордера на Bybit: {e}")
+            logging.error(f"❌ Ошибка создания: {e}")
             return None
 
     async def manage_orders(self, symbol: str, max_age_hours: int = 3):
-        """Отменяет зависшие лимитки."""
         trade_symbol = f"{symbol}:USDT" if ":" not in symbol else symbol
         try:
             open_orders = await self.exchange.fetch_open_orders(trade_symbol)
@@ -162,10 +156,14 @@ class BybitTrader:
             for order in open_orders:
                 age_hours = (now - order.get('timestamp', now)) / 3600000.0
                 if age_hours > max_age_hours:
-                    await self.exchange.cancel_order(order['id'], trade_symbol)
-                    logging.info(f"🧹 Отменён зависший ордер {trade_symbol}")
+                    try:
+                        await self.exchange.cancel_order(order['id'], trade_symbol)
+                        logging.info(f"🧹 Отменен зависший ордер {trade_symbol}")
+                    except Exception as e:
+                        if "110001" in str(e): pass # Ордер уже исполнен
+                        else: logging.error(f"Ошибка отмены: {e}")
         except Exception as e:
-            logging.error(f"Ошибка отмены для {symbol}: {e}")
+            pass
 
     async def close(self):
         if self._monitor_task:
