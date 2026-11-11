@@ -16,7 +16,7 @@ CHAT_ID: int = int(_require("CHAT_ID"))
 BYBIT_API_KEY: str = os.getenv("BYBIT_API_KEY", "").strip()
 BYBIT_API_SECRET: str = os.getenv("BYBIT_API_SECRET", "").strip()
 
-# 47 пар, которые у вас были изначально
+# 47 пар (убран CHZ/USDT)
 SYMBOLS: list[str] = [
     s.strip()
     for s in os.getenv("SYMBOLS", (
@@ -26,8 +26,8 @@ SYMBOLS: list[str] = [
         "GALA/USDT,ENS/USDT,CRV/USDT,WIF/USDT,BOME/USDT,TIA/USDT,INJ/USDT,"
         "FIL/USDT,ICP/USDT,HBAR/USDT,KAS/USDT,FET/USDT,JUP/USDT,PYTH/USDT,"
         "JTO/USDT,WLD/USDT,MANTA/USDT,DYM/USDT,PIXEL/USDT,PORTAL/USDT,"
-        "ARKM/USDT,ENA/USDT,W/USDT,FTM/USDT,SAND/USDT,MANA/USDT,"
-        "GRT/USDT,CHZ/USDT"
+        "ARKM/USDT,ENA/USDT,W/USDT,TON/USDT,FTM/USDT,SAND/USDT,MANA/USDT,"
+        "GRT/USDT"
     )).split(",")
     if s.strip()
 ]
@@ -40,3 +40,6 @@ RISK_REWARD: float = float(os.getenv("RISK_REWARD", "3.0"))
 TICK_SIZE: float = float(os.getenv("TICK_SIZE", "0.01"))
 RISK_PERCENT: float = float(os.getenv("RISK_PERCENT", "1.0"))
 BATCH_SIZE: int = int(os.getenv("BATCH_SIZE", "10"))
+
+# Флаг для графиков (по умолчанию включены)
+ENABLE_CHARTS: bool = os.getenv("ENABLE_CHARTS", "True").lower() == "true"
